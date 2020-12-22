@@ -21,16 +21,24 @@ static const uint32_t workgroup_height = 8;
 
 const int NUM_SAMPLES = 64;
 
-[[using spirv: buffer, binding(0)]]
+enum bindings {
+  binding_imageData = 0,
+  binding_tlas      = 1,
+  binding_vertices  = 2,
+  binding_indices   = 3,
+};
+
+
+[[using spirv: buffer, binding(binding_imageData)]]
 vec3 shader_imageData[];
 
-[[using spirv: uniform, binding(1)]]
+[[using spirv: uniform, binding(binding_tlas)]]
 accelerationStructure shader_tlas;
 
-[[using spirv: buffer, binding(2)]]
+[[using spirv: buffer, binding(binding_vertices)]]
 vec3 shader_vertices[];
 
-[[using spirv: buffer, binding(3)]]
+[[using spirv: buffer, binding(binding_indices)]]
 uint shader_indices[];
 
 // Steps the RNG and returns a floating-point value between 0 and 1 inclusive.
@@ -369,10 +377,10 @@ int main(int argc, const char** argv)
   // 2 - a storage buffer (the vertex buffer)
   // 3 - a storage buffer (the index buffer)
   nvvk::DescriptorSetContainer descriptorSetContainer(context);
-  descriptorSetContainer.addBinding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-  descriptorSetContainer.addBinding(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-  descriptorSetContainer.addBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-  descriptorSetContainer.addBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_imageData, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_tlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_vertices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_indices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
   // Create a layout from the list of bindings
   descriptorSetContainer.initLayout();
   // Create a descriptor pool from the list of bindings with space for 1 set, and allocate that set
@@ -386,23 +394,23 @@ int main(int argc, const char** argv)
   VkDescriptorBufferInfo descriptorBufferInfo{};
   descriptorBufferInfo.buffer = buffer.buffer;    // The VkBuffer object
   descriptorBufferInfo.range  = bufferSizeBytes;  // The length of memory to bind; offset is 0.
-  writeDescriptorSets[0]      = descriptorSetContainer.makeWrite(0 /*set index*/, 0 /*binding*/, &descriptorBufferInfo);
+  writeDescriptorSets[0]      = descriptorSetContainer.makeWrite(0 /*set index*/, binding_imageData /*binding*/, &descriptorBufferInfo);
   // 1
   VkWriteDescriptorSetAccelerationStructureKHR descriptorAS = nvvk::make<VkWriteDescriptorSetAccelerationStructureKHR>();
   VkAccelerationStructureKHR tlasCopy = raytracingBuilder.getAccelerationStructure();  // So that we can take its address
   descriptorAS.accelerationStructureCount = 1;
   descriptorAS.pAccelerationStructures    = &tlasCopy;
-  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, 1, &descriptorAS);
+  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, binding_tlas, &descriptorAS);
   // 2
   VkDescriptorBufferInfo vertexDescriptorBufferInfo{};
   vertexDescriptorBufferInfo.buffer = vertexBuffer.buffer;
   vertexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[2]            = descriptorSetContainer.makeWrite(0, 2, &vertexDescriptorBufferInfo);
+  writeDescriptorSets[2]            = descriptorSetContainer.makeWrite(0, binding_vertices, &vertexDescriptorBufferInfo);
   // 3
   VkDescriptorBufferInfo indexDescriptorBufferInfo{};
   indexDescriptorBufferInfo.buffer = indexBuffer.buffer;
   indexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, 3, &indexDescriptorBufferInfo);
+  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, binding_indices, &indexDescriptorBufferInfo);
   vkUpdateDescriptorSets(context,                                            // The context
                          static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects
                          writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects

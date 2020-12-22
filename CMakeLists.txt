@@ -46,9 +46,6 @@ add_subdirectory(checkpoints/11_specular)
 add_subdirectory(checkpoints/12_antialiasing)
 add_subdirectory(vk_mini_path_tracer) # End of main tutorial
 add_subdirectory(checkpoints/e1_gaussian)
-# add_subdirectory(checkpoints/e2_performance) # This is an empty chapter
-add_subdirectory(checkpoints/e3_compaction)
-add_subdirectory(checkpoints/e4_include)
 add_subdirectory(checkpoints/e5_push_constants)
 add_subdirectory(checkpoints/e6_more_samples)
 add_subdirectory(checkpoints/e7_image)
