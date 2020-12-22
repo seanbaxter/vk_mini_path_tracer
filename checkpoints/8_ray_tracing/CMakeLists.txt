@@ -24,12 +24,8 @@ SET(VULKAN_TARGET_ENV vulkan1.2)
 
 UNSET(GLSL_SOURCES)
 UNSET(SPV_OUTPUT)
-file(GLOB_RECURSE GLSL_HEADER_FILES "shaders/*.h")
-file(GLOB_RECURSE GLSL_SOURCE_FILES "shaders/*.glsl")
-foreach(GLSL ${GLSL_SOURCE_FILES})
-    get_filename_component(FILE_NAME ${GLSL} NAME)
-    _compile_GLSL(${GLSL} "shaders/${FILE_NAME}.spv" GLSL_SOURCES SPV_OUTPUT)
-endforeach(GLSL)
+
+set_source_files_properties(main.cpp PROPERTIES COMPILE_FLAGS -shader)
 
 list(APPEND GLSL_SOURCES ${GLSL_HEADER_FILES})
 source_group("Shader Files" FILES ${GLSL_SOURCES})

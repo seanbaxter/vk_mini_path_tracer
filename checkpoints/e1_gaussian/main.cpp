@@ -19,6 +19,193 @@ static const uint64_t render_height    = 600;
 static const uint32_t workgroup_width  = 16;
 static const uint32_t workgroup_height = 8;
 
+const int NUM_SAMPLES = 64;
+
+[[using spirv: buffer, binding(0)]]
+vec3 shader_imageData[];
+
+[[using spirv: uniform, binding(1)]]
+accelerationStructure shader_tlas;
+
+[[using spirv: buffer, binding(2)]]
+vec3 shader_vertices[];
+
+[[using spirv: buffer, binding(3)]]
+uint shader_indices[];
+
+// Steps the RNG and returns a floating-point value between 0 and 1 inclusive.
+inline float stepAndOutputRNGFloat(uint& rngState)
+{
+  // Condensed version of pcg_output_rxs_m_xs_32_32, with simple conversion to floating-point [0,1].
+  rngState  = rngState * 747796405 + 1;
+  uint word = ((rngState >> ((rngState >> 28) + 4)) ^ rngState) * 277803737;
+  word      = (word >> 22) ^ word;
+  return float(word) / 4294967295.0f;
+}
+
+
+// Uses the Box-Muller transform to return a normally distributed (centered
+// at 0, standard deviation 1) 2D point.
+vec2 randomGaussian(uint& rngState)
+{
+  // Almost uniform in (0, 1] - make sure the value is never 0:
+  const float u1    = max(1e-38f, stepAndOutputRNGFloat(rngState));
+  const float u2    = stepAndOutputRNGFloat(rngState);  // In [0, 1]
+  const float r     = sqrt(-2.0 * log(u1));
+  const float theta = 2 * M_PIf32 * u2;  // Random in [0, 2pi]
+  return r * vec2(cos(theta), sin(theta));
+}
+
+// Returns the color of the sky in a given direction (in linear color space)
+inline vec3 skyColor(vec3 direction)
+{
+  // +y in world space is up, so:
+  if(direction.y > 0.0f)
+  {
+    return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
+  }
+  else
+  {
+    return vec3(0.03f);
+  }
+}
+
+struct HitInfo
+{
+  vec3 color;
+  vec3 worldPosition;
+  vec3 worldNormal;
+};
+
+inline HitInfo getObjectHitInfo(gl_rayQuery& rayQuery)
+{
+  HitInfo result;
+  // Get the ID of the triangle
+  const int primitiveID = gl_rayQueryGetIntersectionPrimitiveIndex(rayQuery, true);
+
+  // Get the indices of the vertices of the triangle
+  const uint i0 = shader_indices[3 * primitiveID + 0];
+  const uint i1 = shader_indices[3 * primitiveID + 1];
+  const uint i2 = shader_indices[3 * primitiveID + 2];
+
+  // Get the vertices of the triangle
+  const vec3 v0 = shader_vertices[i0];
+  const vec3 v1 = shader_vertices[i1];
+  const vec3 v2 = shader_vertices[i2];
+
+  // Get the barycentric coordinates of the intersection
+  vec3 barycentrics;
+  barycentrics.yz = gl_rayQueryGetIntersectionBarycentrics(rayQuery, true);
+  barycentrics.x    = 1.0 - barycentrics.y - barycentrics.z;
+
+  // Compute the coordinates of the intersection
+  const vec3 objectPos = v0 * barycentrics.x + v1 * barycentrics.y + v2 * barycentrics.z;
+  // For the main tutorial, object space is the same as world space:
+  result.worldPosition = objectPos;
+
+  const vec3 objectNormal = normalize(cross(v1 - v0, v2 - v0));
+  result.worldNormal = objectNormal;
+
+  result.color = vec3(0.7f);
+  return result;
+}
+
+[[using spirv: comp, local_size(workgroup_width, workgroup_height)]]
+void compute_shader() {
+  const ivec2 resolution(render_width, render_height);
+  const ivec2 pixel = ivec2(glcomp_GlobalInvocationID.xy);
+
+  if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
+    return;
+
+  // State of the random number generator.
+  uint rngState = resolution.x * pixel.y + pixel.x;  // Initial seed
+
+  const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
+  const float fovVerticalSlope = 1.0 / 5.0;
+
+  // The sum of the colors of all of the samples.
+  vec3 summedPixelColor (0.0);
+
+  // Limit the kernel to trace at most 64 samples.
+  for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
+  {
+
+    // Rays always originate at the camera for now. In the future, they'll
+    // bounce around the scene.
+    vec3 rayOrigin = cameraOrigin;
+
+    const vec2 randomPixelCenter = vec2(pixel) + vec2(0.5) + 
+      0.375f * randomGaussian(rngState);
+
+    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / vec2(resolution);
+    screenUV.y = -screenUV.y;
+
+
+    vec3 rayDirection(fovVerticalSlope * screenUV, -1.0);
+    rayDirection = normalize(rayDirection);
+
+    vec3 accumulatedRayColor(1);  // The amount of light that made it to the end of the current ray.
+
+
+    // Limit the kernel to trace at most 32 segments.
+    for(int tracedSegments = 0; tracedSegments < 32; tracedSegments++)
+    {
+      // Trace the ray and see if and where it intersects the scene!
+      // First, initialize a ray query object:
+      gl_rayQuery rayQuery;
+      gl_rayQueryInitialize(rayQuery,              // Ray query
+                            shader_tlas,           // Top-level acceleration structure
+                            gl_RayFlagsOpaque,     // Ray flags, here saying "treat all geometry as opaque"
+                            0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                            rayOrigin,             // Ray origin
+                            0.0,                   // Minimum t-value
+                            rayDirection,          // Ray direction
+                            10000.0);              // Maximum t-value
+      while(gl_rayQueryProceed(rayQuery));
+
+      // Get the type of committed (true) intersection - nothing, a triangle, or
+      // a generated object
+      if(gl_rayQueryGetIntersectionType(rayQuery, true) == 
+        gl_RayQueryCommittedIntersectionTriangle)
+      {
+        // Ray hit a triangle
+        HitInfo hitInfo = getObjectHitInfo(rayQuery);
+
+        // Apply color absorption
+        accumulatedRayColor *= hitInfo.color;
+
+        // Flip the normal so it points against the ray direction:
+        hitInfo.worldNormal = faceforward(hitInfo.worldNormal, rayDirection, hitInfo.worldNormal);
+
+        // Start a new ray at the hit position, but offset it slightly along the normal:
+        rayOrigin = hitInfo.worldPosition + 0.0001f * hitInfo.worldNormal;
+
+        // Reflect the direction of the ray using the triangle normal:
+        rayDirection = reflect(rayDirection, hitInfo.worldNormal);
+      }
+      else
+      {
+        // Ray hit the sky
+        accumulatedRayColor *= skyColor(rayDirection);
+
+        // Sum this with the pixel's other samples.
+        // (Note that we treat a ray that didn't find a light source as if it had
+        // an accumulated color of (0, 0, 0)).
+        summedPixelColor += accumulatedRayColor;
+
+        break;
+      }
+    }
+  }
+
+  // Get the index of this invocation in the buffer:
+  uint linearIndex       = resolution.x * pixel.y + pixel.x;
+  shader_imageData[linearIndex] =  summedPixelColor / NUM_SAMPLES;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
   VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();

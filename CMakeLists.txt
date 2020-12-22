@@ -38,13 +38,7 @@ _add_shared_sources_lib()
 #####################################################################################
 # Add chapters
 add_subdirectory(_edit) # Empty starting project
-add_subdirectory(checkpoints/1_hello_vulkan)
-add_subdirectory(checkpoints/2_extensions)
-add_subdirectory(checkpoints/3_memory)
-add_subdirectory(checkpoints/4_commands)
-add_subdirectory(checkpoints/5_write_image)
 add_subdirectory(checkpoints/6_compute_shader)
-add_subdirectory(checkpoints/7_descriptors)
 add_subdirectory(checkpoints/8_ray_tracing)
 add_subdirectory(checkpoints/9_intersection)
 add_subdirectory(checkpoints/10_mesh_data)

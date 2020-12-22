@@ -19,6 +19,97 @@ static const uint64_t render_height    = 600;
 static const uint32_t workgroup_width  = 16;
 static const uint32_t workgroup_height = 8;
 
+////////////////////////////////////////////////////////////////////////////////
+
+[[using spirv: buffer, binding(0)]]
+vec3 shader_imageData[];
+
+[[using spirv: uniform, binding(1)]]
+accelerationStructure shader_tlas;
+
+[[using spirv: buffer, binding(2)]]
+vec3 shader_vertices[];
+
+[[using spirv: buffer, binding(3)]]
+uint shader_indices[];
+
+[[using spirv: comp, local_size(workgroup_width, workgroup_height)]]
+void compute_shader() {
+  const ivec2 resolution(render_width, render_height);
+  const ivec2 pixel = ivec2(glcomp_GlobalInvocationID.xy);
+
+  if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
+    return;
+
+  const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
+  vec3 rayOrigin = cameraOrigin;
+  vec2 screenUV = vec2(2 * pixel + 1 - resolution) / vec2(resolution);
+  screenUV.y = -screenUV.y;
+
+  const float fovVerticalSlope = 1.0 / 5.0;
+  vec3 rayDirection(fovVerticalSlope * screenUV, -1.0);
+
+  gl_rayQuery rayQuery;
+  gl_rayQueryInitialize(rayQuery,              // Ray query
+                        shader_tlas,           // Top-level acceleration structure
+                        gl_RayFlagsOpaque,     // Ray flags, here saying "treat all geometry as opaque"
+                        0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                        rayOrigin,             // Ray origin
+                        0.0,                   // Minimum t-value
+                        rayDirection,          // Ray direction
+                        10000.0);              // Maximum t-value
+  while(gl_rayQueryProceed(rayQuery));
+
+  vec3 pixelColor;
+  // Get the type of committed (true) intersection - nothing, a triangle, or
+  // a generated object
+  if(gl_rayQueryGetIntersectionType(rayQuery, true) == 
+    gl_RayQueryCommittedIntersectionTriangle)
+  {
+    // Get the ID of the triangle
+    const int primitiveID = gl_rayQueryGetIntersectionPrimitiveIndex(rayQuery, true);
+
+    // Get the indices of the vertices of the triangle
+    const uint i0 = shader_indices[3 * primitiveID + 0];
+    const uint i1 = shader_indices[3 * primitiveID + 1];
+    const uint i2 = shader_indices[3 * primitiveID + 2];
+
+    // Get the vertices of the triangle
+    const vec3 v0 = shader_vertices[i0];
+    const vec3 v1 = shader_vertices[i1];
+    const vec3 v2 = shader_vertices[i2];
+
+    // Compute the normal of the triangle in object space, using the right-hand
+    // rule. Since our transformation matrix is the identity, object space
+    // is the same as world space.
+    //    v2       .
+    //    |\       .
+    //    | \      .
+    //    |  \     .
+    //    |/  \    .
+    //    /    \   .
+    //   /|     \  .
+    //  L v0----v1 .
+    // n
+    const vec3 objectNormal = normalize(cross(v1 - v0, v2 - v0));
+
+    // For this chapter, convert the normal into a visible color.
+    pixelColor = vec3(0.5) + 0.5 * objectNormal;
+  }
+  else
+  {
+    // Ray hit the sky
+    pixelColor = vec3(0.0, 0.0, 0.5);
+  }
+
+  // Get the index of this invocation in the buffer:
+  uint linearIndex       = resolution.x * pixel.y + pixel.x;
+  shader_imageData[linearIndex] = pixelColor;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
   VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();
@@ -222,14 +313,14 @@ int main(int argc, const char** argv)
                          0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
   // Shader loading and pipeline creation
-  VkShaderModule rayTraceModule =
-      nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.comp.glsl.spv", true, searchPaths));
+  VkShaderModule rayTraceModule = nvvk::createShaderModule(context, 
+    __spirv_data, __spirv_size / 4);
 
   // Describes the entrypoint and the stage to use for this shader module in the pipeline
   VkPipelineShaderStageCreateInfo shaderStageCreateInfo = nvvk::make<VkPipelineShaderStageCreateInfo>();
   shaderStageCreateInfo.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
   shaderStageCreateInfo.module                          = rayTraceModule;
-  shaderStageCreateInfo.pName                           = "main";
+  shaderStageCreateInfo.pName                           = @spirv(compute_shader);
 
   // Create the compute pipeline
   VkComputePipelineCreateInfo pipelineCreateInfo = nvvk::make<VkComputePipelineCreateInfo>();

@@ -15,6 +15,12 @@ static const uint64_t render_height    = 600;
 static const uint32_t workgroup_width  = 16;
 static const uint32_t workgroup_height = 8;
 
+[[using spirv: comp, local_size(workgroup_width, workgroup_height)]]
+void compute_shader() {
+  printf("Hello from invocation (%d, %d)!\n", glcomp_GlobalInvocationID.x, 
+    glcomp_GlobalInvocationID.y);
+}
+
 int main(int argc, const char** argv)
 {
   // Create the Vulkan context, consisting of an instance, device, physical device, and queues.
@@ -39,7 +45,7 @@ int main(int argc, const char** argv)
 #ifdef _WIN32
   _putenv_s("DEBUG_PRINTF_TO_STDOUT", "1");
 #else   // If not _WIN32
-  putenv("DEBUG_PRINTF_TO_STDOUT=1");
+  setenv("DEBUG_PRINTF_TO_STDOUT", "1", 1);
 #endif  // _WIN32
 
   nvvk::Context context;     // Encapsulates device state in a single object
@@ -65,10 +71,6 @@ int main(int argc, const char** argv)
                                                             | VK_MEMORY_PROPERTY_HOST_CACHED_BIT  //
                                                             | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-  std::vector<std::string> searchPaths = {
-      PROJECT_ABSDIRECTORY,       PROJECT_ABSDIRECTORY "../",    PROJECT_ABSDIRECTORY "../../", PROJECT_RELDIRECTORY,
-      PROJECT_RELDIRECTORY "../", PROJECT_RELDIRECTORY "../../", PROJECT_NAME};
-
   // Create the command pool
   VkCommandPoolCreateInfo cmdPoolInfo = nvvk::make<VkCommandPoolCreateInfo>();
   cmdPoolInfo.queueFamilyIndex        = context.m_queueGCT;
@@ -76,14 +78,13 @@ int main(int argc, const char** argv)
   NVVK_CHECK(vkCreateCommandPool(context, &cmdPoolInfo, nullptr, &cmdPool));
 
   // Shader loading and pipeline creation
-  VkShaderModule rayTraceModule =
-      nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.comp.glsl.spv", true, searchPaths));
+  VkShaderModule rayTraceModule = nvvk::createShaderModule(context, __spirv_data, __spirv_size / 4);
 
   // Describes the entrypoint and the stage to use for this shader module in the pipeline
   VkPipelineShaderStageCreateInfo shaderStageCreateInfo = nvvk::make<VkPipelineShaderStageCreateInfo>();
   shaderStageCreateInfo.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
   shaderStageCreateInfo.module                          = rayTraceModule;
-  shaderStageCreateInfo.pName                           = "main";
+  shaderStageCreateInfo.pName                           = @spirv(compute_shader);
 
   // For the moment, create an empty pipeline layout. You can ignore this code
   // for now; we'll replace it in the next chapter.

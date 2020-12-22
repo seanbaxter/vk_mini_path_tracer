@@ -19,6 +19,64 @@ static const uint64_t render_height    = 600;
 static const uint32_t workgroup_width  = 16;
 static const uint32_t workgroup_height = 8;
 
+[[using spirv: buffer, binding(0)]]
+vec3 shader_imageData[];
+
+[[using spirv: uniform, binding(1)]]
+accelerationStructure shader_tlas;
+
+[[using spirv: comp, local_size(workgroup_width, workgroup_height)]]
+void compute_shader() {
+  const ivec2 resolution(render_width, render_height);
+  const ivec2 pixel = ivec2(glcomp_GlobalInvocationID.xy);
+
+  if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
+    return;
+
+  const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
+  vec3 rayOrigin = cameraOrigin;
+  vec2 screenUV = vec2(2 * pixel + 1 - resolution) / vec2(resolution);
+  screenUV.y = -screenUV.y;
+
+  const float fovVerticalSlope = 1.0 / 5.0;
+  vec3 rayDirection(fovVerticalSlope * screenUV, -1.0);
+
+  gl_rayQuery rayQuery;
+  gl_rayQueryInitialize(rayQuery,              // Ray query
+                        shader_tlas,           // Top-level acceleration structure
+                        gl_RayFlagsOpaque,     // Ray flags, here saying "treat all geometry as opaque"
+                        0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                        rayOrigin,             // Ray origin
+                        0.0,                   // Minimum t-value
+                        rayDirection,          // Ray direction
+                        10000.0);              // Maximum t-value
+  while(gl_rayQueryProceed(rayQuery));
+
+  vec3 pixelColor;
+  // Get the type of committed (true) intersection - nothing, a triangle, or
+  // a generated object
+  if(gl_rayQueryGetIntersectionType(rayQuery, true) == 
+    gl_RayQueryCommittedIntersectionTriangle)
+  {
+    // Create a vec3(0, b.x, b.y)
+    pixelColor.yz = gl_rayQueryGetIntersectionBarycentrics(rayQuery, true);
+    // Set the first element to 1 - b.x - b.y, setting pixelColor to
+    // (1 - b.x - b.y, b.x, b.y).
+    pixelColor.x = 1 - pixelColor.y - pixelColor.z;
+  }
+  else
+  {
+    // Ray hit the sky
+    pixelColor = vec3(0.0, 0.0, 0.5);
+  }
+
+  // Get the index of this invocation in the buffer:
+  uint linearIndex       = resolution.x * pixel.y + pixel.x;
+  shader_imageData[linearIndex] = pixelColor;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
   VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();
@@ -208,14 +266,14 @@ int main(int argc, const char** argv)
                          0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
   // Shader loading and pipeline creation
-  VkShaderModule rayTraceModule =
-      nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.comp.glsl.spv", true, searchPaths));
+  VkShaderModule rayTraceModule = nvvk::createShaderModule(context,
+    __spirv_data, __spirv_size / 4);
 
   // Describes the entrypoint and the stage to use for this shader module in the pipeline
   VkPipelineShaderStageCreateInfo shaderStageCreateInfo = nvvk::make<VkPipelineShaderStageCreateInfo>();
   shaderStageCreateInfo.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
   shaderStageCreateInfo.module                          = rayTraceModule;
-  shaderStageCreateInfo.pName                           = "main";
+  shaderStageCreateInfo.pName                           = @spirv(compute_shader);
 
   // Create the compute pipeline
   VkComputePipelineCreateInfo pipelineCreateInfo = nvvk::make<VkComputePipelineCreateInfo>();

@@ -18,8 +18,8 @@
 #include "common.h"
 
 PushConstants  pushConstants;
-const uint32_t render_width  = 800;
-const uint32_t render_height = 600;
+const uint32_t render_width  = 4000;
+const uint32_t render_height = 3000;
 
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {

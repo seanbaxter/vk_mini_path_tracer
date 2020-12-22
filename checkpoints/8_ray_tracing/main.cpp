@@ -19,6 +19,87 @@ static const uint64_t render_height    = 600;
 static const uint32_t workgroup_width  = 16;
 static const uint32_t workgroup_height = 8;
 
+////////////////////////////////////////////////////////////////////////////////
+
+// Interface variables.
+[[using spirv: buffer, binding(0)]]
+vec3 shader_imageData[];
+
+[[using spirv: uniform, binding(1)]]
+accelerationStructure shader_tlas;
+
+[[using spirv: comp, local_size(workgroup_width, workgroup_height)]]
+void rt_compute_shader()
+{
+  // The resolution of the buffer, which in this case is a hardcoded vector
+  // of 2 unsigned integers:
+  const ivec2 resolution(render_width, render_height);
+
+  // Get the coordinates of the pixel for this invocation:
+  //
+  // .-------.-> x
+  // |       |
+  // |       |
+  // '-------'
+  // v
+  // y
+  const ivec2 pixel = ivec2(glcomp_GlobalInvocationID.xy);
+
+  // If the pixel is outside of the image, don't do anything:
+  if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
+    return;
+
+  // This scene uses a right-handed coordinate system like the OBJ file format, where the
+  // +x axis points right, the +y axis points up, and the -z axis points into the screen.
+  // The camera is located at (-0.001, 1, 6).
+  const vec3 cameraOrigin = vec3(-0.001, 1.0, 6.0);
+  // Rays always originate at the camera for now. In the future, they'll
+  // bounce around the scene.
+  vec3 rayOrigin = cameraOrigin;
+  // Compute the direction of the ray for this pixel. To do this, we first
+  // transform the screen coordinates to look like this, where a is the
+  // aspect ratio (width/height) of the screen:
+  //           1
+  //    .------+------.
+  //    |      |      |
+  // -a + ---- 0 ---- + a
+  //    |      |      |
+  //    '------+------'
+  //          -1
+  vec2 screenUV = vec2(2 * pixel + 1 - resolution) / vec2(resolution);
+  screenUV.y = -screenUV.y;
+
+  // Next, define the field of view by the vertical slope of the topmost rays,
+  // and create a ray direction:
+  const float fovVerticalSlope = 1.0 / 5.0;
+  vec3        rayDirection     = vec3(fovVerticalSlope * screenUV, -1.0);
+
+  // Trace the ray and see if and where it intersects the scene!
+  // First, initialize a ray query object:
+  gl_rayQuery rayQuery;
+  gl_rayQueryInitialize(rayQuery,              // Ray query
+                        shader_tlas,           // Top-level acceleration structure
+                        gl_RayFlagsOpaque,     // Ray flags, here saying "treat all geometry as opaque"
+                        0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                        rayOrigin,             // Ray origin
+                        0.0,                   // Minimum t-value
+                        rayDirection,          // Ray direction
+                        10000.0);              // Maximum t-value
+
+  // Start traversal, and loop over all ray-scene intersections. When this finishes,
+  // rayQuery stores a "committed" intersection, the closest intersection (if any).
+  while(gl_rayQueryProceed(rayQuery));
+
+  // Get the t-value of the intersection (if there's no intersection, this will
+  // be tMax = 10000.0). "true" says "get the committed intersection."
+  const float t = gl_rayQueryGetIntersectionT(rayQuery, true);
+
+  // Get the index of this invocation in the buffer:
+  uint linearIndex = resolution.x * pixel.y + pixel.x;
+  // Give the pixel the color (t/10, t/10, t/10):
+  shader_imageData[linearIndex] = vec3(t / 10.0);
+}
+
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
   VkCommandBufferAllocateInfo cmdAllocInfo = nvvk::make<VkCommandBufferAllocateInfo>();
@@ -53,6 +134,8 @@ VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
 
 int main(int argc, const char** argv)
 {
+//  @spirv(rt_comp);
+
   // Create the Vulkan context, consisting of an instance, device, physical device, and queues.
   nvvk::ContextCreateInfo deviceInfo;  // One can modify this to load different extensions or pick the Vulkan core version
   deviceInfo.apiMajor = 1;             // Specify the version of Vulkan we'll use
@@ -207,15 +290,27 @@ int main(int argc, const char** argv)
                          writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects
                          0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
+  printf("Loading module...\n");
+
   // Shader loading and pipeline creation
-  VkShaderModule rayTraceModule =
-      nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.comp.glsl.spv", true, searchPaths));
+
+  // std::vector<char> module = read_file("comp.shader.spv");
+  // printf("module size = %d\n", module.size());
+  //VkShaderModule rayTraceModule = nvvk::createShaderModule(context, module.data(),
+  //  module.size() / 4);
+
+  VkShaderModule rayTraceModule = nvvk::createShaderModule(context, 
+    __spirv_data, __spirv_size / 4);
+
+  printf("Loaded module\n");
 
   // Describes the entrypoint and the stage to use for this shader module in the pipeline
   VkPipelineShaderStageCreateInfo shaderStageCreateInfo = nvvk::make<VkPipelineShaderStageCreateInfo>();
   shaderStageCreateInfo.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
   shaderStageCreateInfo.module                          = rayTraceModule;
-  shaderStageCreateInfo.pName                           = "main";
+  shaderStageCreateInfo.pName                           = @spirv(rt_compute_shader); //"_Z7rt_compv";
+
+  printf("Creating compute pipeline...\n");
 
   // Create the compute pipeline
   VkComputePipelineCreateInfo pipelineCreateInfo = nvvk::make<VkComputePipelineCreateInfo>();
@@ -228,6 +323,8 @@ int main(int argc, const char** argv)
                                       1, &pipelineCreateInfo,  // Compute pipeline create info
                                       nullptr,                 // Allocator (uses default)
                                       &computePipeline));      // Output
+
+  printf("Created compute pipeline\n");
 
   // Create and start recording a command buffer
   VkCommandBuffer cmdBuffer = AllocateAndBeginOneTimeCommandBuffer(context, cmdPool);
