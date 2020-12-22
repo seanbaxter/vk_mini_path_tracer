@@ -187,10 +187,18 @@ void compute_shader() {
         hitInfo.worldNormal = faceforward(hitInfo.worldNormal, rayDirection, hitInfo.worldNormal);
 
         // Start a new ray at the hit position, but offset it slightly along the normal:
-        rayOrigin = hitInfo.worldPosition + 0.0001f * hitInfo.worldNormal;
+        rayOrigin = hitInfo.worldPosition + 0.0001 * hitInfo.worldNormal;
 
-        // Reflect the direction of the ray using the triangle normal:
-        rayDirection = reflect(rayDirection, hitInfo.worldNormal);
+        // For a random diffuse bounce direction, we follow the approach of
+        // Ray Tracing in One Weekend, and generate a random point on a sphere
+        // of radius 1 centered at the normal. This uses the random_unit_vector
+        // function from chapter 8.5:
+        const float theta = 2.0 * M_PIf32 * stepAndOutputRNGFloat(rngState);  // Random in [0, 2pi]
+        const float u     = 2.0 * stepAndOutputRNGFloat(rngState) - 1.0;   // Random in [-1, 1]
+        const float r     = sqrt(1.0 - u * u);
+        rayDirection      = hitInfo.worldNormal + vec3(r * cos(theta), r * sin(theta), u);
+        // Then normalize the ray direction:
+        rayDirection = normalize(rayDirection);
       }
       else
       {

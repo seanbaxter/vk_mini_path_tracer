@@ -45,11 +45,11 @@ add_subdirectory(checkpoints/10_mesh_data)
 add_subdirectory(checkpoints/11_specular)
 add_subdirectory(checkpoints/12_antialiasing)
 add_subdirectory(vk_mini_path_tracer) # End of main tutorial
+
 add_subdirectory(checkpoints/e1_gaussian)
 add_subdirectory(checkpoints/e5_push_constants)
 add_subdirectory(checkpoints/e6_more_samples)
 add_subdirectory(checkpoints/e7_image)
-add_subdirectory(checkpoints/e8_debug_names)
 add_subdirectory(checkpoints/e9_instances)
 add_subdirectory(checkpoints/e10_materials)
 add_subdirectory(checkpoints/e11_rt_pipeline_1)
