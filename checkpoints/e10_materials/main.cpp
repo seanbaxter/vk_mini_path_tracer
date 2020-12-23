@@ -15,11 +15,494 @@
 #include <nvvk/shaders_vk.hpp>         // For nvvk::createShaderModule
 #include <nvvk/structs_vk.hpp>         // For nvvk::make
 
-#include "common.h"
+constexpr int div_up(int x, int y) {
+  return (x + y - 1) / y;
+}
 
-PushConstants  pushConstants;
-const uint32_t render_width  = 4000;
-const uint32_t render_height = 3000;
+////////////////////////////////////////////////////////////////////////////////
+
+static const uint32_t workgroup_width  = 16;
+static const uint32_t workgroup_height = 8;
+
+enum bindings {
+  binding_image     = 0,
+  binding_tlas      = 1,
+  binding_vertices  = 2,
+  binding_indices   = 3,
+};
+
+struct PushConstants
+{
+  int num_samples;
+  int sample_batch;
+};
+
+[[spirv::push]]
+PushConstants shader_push;
+
+[[using spirv: uniform, format(rgba32f), binding(binding_image)]]
+image2D shader_image;
+
+[[using spirv: uniform, binding(binding_tlas)]]
+accelerationStructure shader_tlas;
+
+[[using spirv: buffer, binding(binding_vertices)]]
+vec3 shader_vertices[];
+
+[[using spirv: buffer, binding(binding_indices)]]
+uint shader_indices[];
+
+// Steps the RNG and returns a floating-point value between 0 and 1 inclusive.
+inline float stepAndOutputRNGFloat(uint& rngState) {
+  // Condensed version of pcg_output_rxs_m_xs_32_32, with simple conversion to floating-point [0,1].
+  rngState  = rngState * 747796405 + 1;
+  uint word = ((rngState >> ((rngState >> 28) + 4)) ^ rngState) * 277803737;
+  word      = (word >> 22) ^ word;
+  return float(word) / 4294967295.0f;
+}
+
+
+// Uses the Box-Muller transform to return a normally distributed (centered
+// at 0, standard deviation 1) 2D point.
+vec2 randomGaussian(uint& rngState)
+{
+  // Almost uniform in (0, 1] - make sure the value is never 0:
+  const float u1    = max(1e-38f, stepAndOutputRNGFloat(rngState));
+  const float u2    = stepAndOutputRNGFloat(rngState);  // In [0, 1]
+  const float r     = sqrt(-2 * log(u1));
+  const float theta = 2 * M_PIf32 * u2;  // Random in [0, 2pi]
+  return r * vec2(cos(theta), sin(theta));
+}
+
+// Returns the color of the sky in a given direction (in linear color space)
+inline vec3 skyColor(vec3 direction)
+{
+  // +y in world space is up, so:
+  if(direction.y > 0)
+  {
+    return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
+  }
+  else
+  {
+    return vec3(0.03f);
+  }
+}
+
+// offsetPositionAlongNormal shifts a point on a triangle surface so that a
+// ray bouncing off the surface with tMin = 0.0 is no longer treated as
+// intersecting the surface it originated from.
+//
+// Here's the old implementation of it we used in earlier chapters:
+// vec3 offsetPositionAlongNormal(vec3 worldPosition, vec3 normal)
+// {
+//   return worldPosition + 0.0001 * normal;
+// }
+//
+// However, this code uses an improved technique by Carsten Wächter and
+// Nikolaus Binder from "A Fast and Robust Method for Avoiding
+// Self-Intersection" from Ray Tracing Gems (version 1.7, 2020).
+// The normal can be negated if one wants the ray to pass through
+// the surface instead.
+vec3 offsetPositionAlongNormal(vec3 worldPosition, vec3 normal)
+{
+  // Convert the normal to an integer offset.
+  const float int_scale = 256.0f;
+  const ivec3 of_i      = ivec3(int_scale * normal);
+
+  // Offset each component of worldPosition using its binary representation.
+  // Handle the sign bits correctly.
+  const vec3 p_i = intBitsToFloat(floatBitsToInt(worldPosition) + ((worldPosition < 0) ? -of_i : of_i));
+
+  // Use a floating-point offset instead for points near (0,0,0), the origin.
+  const float origin     = 1.0f / 32.0f;
+  const float floatScale = 1.0f / 65536.0f;
+  return abs(worldPosition) < origin ? worldPosition + floatScale * normal : p_i;
+}
+
+// Returns a random diffuse (Lambertian) reflection for a surface with the
+// given normal, using the given random number generator state. This is
+// cosine-weighted, so directions closer to the normal are more likely to
+// be chosen.
+vec3 diffuseReflection(vec3 normal, uint& rngState)
+{
+  // For a random diffuse bounce direction, we follow the approach of
+  // Ray Tracing in One Weekend, and generate a random point on a sphere
+  // of radius 1 centered at the normal. This uses the random_unit_vector
+  // function from chapter 8.5:
+  const float theta     = 2 * M_PIf32 * stepAndOutputRNGFloat(rngState);  // Random in [0, 2pi]
+  const float u         = 2 * stepAndOutputRNGFloat(rngState) - 1;   // Random in [-1, 1]
+  const float r         = sqrt(1 - u * u);
+  const vec3  direction = normal + vec3(r * cos(theta), r * sin(theta), u);
+
+  // Then normalize the ray direction:
+  return normalize(direction);
+}
+
+struct HitInfo
+{
+  vec3 objectPosition;  // The intersection position in object-space.
+  vec3 worldPosition;   // The intersection position in world-space.
+  vec3 worldNormal;     // The double-sided triangle normal in world-space.
+  vec3 rayDirection;    // Direction of incoming ray.
+  int primitiveID;
+};
+
+struct ReturnedInfo
+{
+  vec3 color;         // The reflectivity of the surface.
+  vec3 rayOrigin;     // The new ray origin in world-space.
+  vec3 rayDirection;  // The new ray direction in world-space.
+};
+
+// Diffuse reflection off a 70% reflective surface (what we've used for most
+// of this tutorial)
+struct material0_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color = color;
+    result.rayOrigin = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+    result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+};
+
+// A mirror-reflective material that absorbs 30% of incoming light.
+struct material1_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color = color;
+    result.rayOrigin = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+    result.rayDirection = reflect(hit.rayDirection, hit.worldNormal);
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+};
+
+// A diffuse surface with faces colored according to their world-space normal.
+struct material2_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color = color + scale * hit.worldNormal;
+    result.rayOrigin = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+    result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+    return result;
+  }
+
+  vec3 color = vec3(0.5);
+  float scale = .5f;
+
+};
+
+// A linear blend of 20% of a mirror-reflective material and 80% of a perfectly
+// diffuse material.
+struct material3_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color     = color;
+    result.rayOrigin = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+    result.rayDirection = (stepAndOutputRNGFloat(rngState) < reflectiveness) ?
+      reflect(hit.rayDirection, hit.worldNormal) :
+      diffuseReflection(hit.worldNormal, rngState);
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+  float reflectiveness = .2;
+};
+
+// A material where 50% of incoming rays pass through the surface (treating it
+// as transparent), and the other 50% bounce off using diffuse reflection.
+struct material4_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color = color;
+    if(stepAndOutputRNGFloat(rngState) < transparency) {
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+      result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+
+    } else {
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, -hit.worldNormal);
+      result.rayDirection = hit.rayDirection;
+    }
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+  float transparency = .5;
+};
+
+// A material with diffuse reflection that is transparent whenever
+// (x + y + z) % 0.5 < 0.25 in object-space coordinates.
+struct material5_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    if(mod(dot(hit.objectPosition, vec3(1, 1, 1)), wavelength) >= transparency) {
+      result.color        = color;
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+      result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+    } else {
+      result.color        = vec3(1.0);
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, -hit.worldNormal);
+      result.rayDirection = hit.rayDirection;
+    }
+    return result;
+  }
+
+  float wavelength = .5f;
+  float transparency = .25;
+  vec3 color = vec3(0.7);
+};
+
+// A mirror material that uses normal mapping: we perturb the geometric
+// (triangle) normal to get a shading normal that varies over the surface, and
+// then use the shading normal to get reflections. This is often used with a
+// texture called a normal map in real-time graphics, because it can make it
+// look like an object has details that aren't there in the geometry. In this
+// function, we perturb the normal without textures using a mathematical
+// function instead.
+// There's a lot of depth (no pun intended) in normal mapping; two things to
+// note in this example are:
+// - It's not well-defined what happens when normal mapping produces a
+// direction that goes through the surface. In this function we mirror it so
+// that it doesn't go through the surface; in a different path tracer, we might
+// reject this ray by setting its sample weight to 0, or do something more
+// sophisticated.
+// - When a BRDF (bidirectional reflectance distribution function; describes
+// how much light from direction A bounces off a material in direction B) uses
+// a shading normal instead of a geometric normal for shading, the BRDF has to
+// be corrected in order to make the math physically correct and to avoid
+// errors in bidirectional path tracers. This function ignores that (we don't
+// describe BRDFs or sample weights in this tutorial!), but the authoritative
+// source for how to do this is chapters 5-7 of Eric Veach's Ph.D. thesis,
+// "Robust Monte Carlo Methods for Light Transport Simulation", available for
+// free online.
+struct material6_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color     = color;
+    result.rayOrigin = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+
+    // Perturb the normal:
+    vec3 perturbationAmount = perturbation * sin(scale * hit.worldPosition);
+    vec3 shadingNormal = normalize(hit.worldNormal + perturbationAmount);
+
+    result.rayDirection = (stepAndOutputRNGFloat(rngState) < reflectiveness) ?
+      reflect(hit.rayDirection, shadingNormal) : 
+      diffuseReflection(shadingNormal, rngState);
+    
+    // If the ray now points into the surface, reflect it across:
+    if(dot(result.rayDirection, hit.worldNormal) <= 0)
+      result.rayDirection = reflect(result.rayDirection, hit.worldNormal);
+
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+  float scale = 80.0;
+  float perturbation = .03;
+  float reflectiveness = .4;
+};
+
+// A diffuse material where the color of each triangle is determined by its
+// primitive ID (the index of the triangle in the BLAS)
+struct material7_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color        = clamp(hit.primitiveID / vec3(36, 9, 18), 0.f, 1.f);
+    result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+    result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+    return result;
+  }
+};
+
+// A diffuse material with transparent cutouts arranged in slices of spheres.
+struct material8_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    if(mod(length(hit.objectPosition), wavelength) >= transparency) {
+      result.color        = color;
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+      result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+    } else {
+      result.color        = vec3(1.0);
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, -hit.worldNormal);
+      result.rayDirection = hit.rayDirection;
+    }
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+  float wavelength = .2f;
+  float transparency = .05;
+};
+
+// Aggregate all the materials we want to use into one data structure.
+// This can be instantiated inside the shader or it can be bound to a UBO.
+// You can freely add and remove materials here. The SBT binding in the host
+// and the switch in the compute shader use reflection so are synced with this
+// single definition.
+struct my_materials_t {
+  material0_t mat0;
+  material1_t mat1;
+  material2_t mat2;
+  material3_t mat3;
+  material4_t mat4;
+  material5_t mat5;
+  material6_t mat6;
+  material7_t mat7;
+  material8_t mat8;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
+inline HitInfo getObjectHitInfo(gl_rayQuery& rayQuery) {
+  HitInfo hit;
+
+  // Get the ID of the triangle
+  hit.primitiveID = gl_rayQueryGetIntersectionPrimitiveIndex(rayQuery, true);
+
+  // Get the indices of the vertices of the triangle
+  uint i0 = shader_indices[3 * hit.primitiveID + 0];
+  uint i1 = shader_indices[3 * hit.primitiveID + 1];
+  uint i2 = shader_indices[3 * hit.primitiveID + 2];
+
+  // Get the vertices of the triangle
+  vec3 v0 = shader_vertices[i0];
+  vec3 v1 = shader_vertices[i1];
+  vec3 v2 = shader_vertices[i2];
+
+  // Get the barycentric coordinates of the intersection
+  vec3 barycentrics;
+  barycentrics.yz = gl_rayQueryGetIntersectionBarycentrics(rayQuery, true);
+  barycentrics.x    = 1 - barycentrics.y - barycentrics.z;
+
+  // Compute the coordinates of the intersection
+  hit.objectPosition = v0 * barycentrics.x + v1 * barycentrics.y + v2 * barycentrics.z;
+
+  // Transform from object space to world space:
+  mat4x3 objectToWorld = gl_rayQueryGetIntersectionObjectToWorld(rayQuery, true);
+  hit.worldPosition       = objectToWorld * vec4(hit.objectPosition, 1);
+
+  vec3 objectNormal = cross(v1 - v0, v2 - v0);
+  mat4x3 objectToWorldInverse = gl_rayQueryGetIntersectionWorldToObject(rayQuery, true);
+  hit.worldNormal = normalize((objectNormal * objectToWorldInverse).xyz);
+
+  hit.rayDirection = gl_rayQueryGetWorldRayDirection(rayQuery);
+  return hit;
+}
+
+template<typename materials_t>
+[[using spirv: comp, local_size(workgroup_width, workgroup_height)]]
+void compute_shader() {
+  const ivec2 resolution = imageSize(shader_image);
+  const ivec2 pixel = ivec2(glcomp_GlobalInvocationID.xy);
+
+  if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
+    return;
+
+  // State of the random number generator.
+  uint rngState = (shader_push.sample_batch * resolution.y + pixel.y) * resolution.x + pixel.x; 
+
+  const vec3 cameraOrigin = vec3(-0.001, 0, 53.0);
+  const float fovVerticalSlope = 1.0 / 5.0;
+
+  // The sum of the colors of all of the samples.
+  vec3 summedPixelColor (0.0);
+
+  // Limit the kernel to trace at most 64 samples.
+  for(int sampleIdx = 0; sampleIdx < shader_push.num_samples; sampleIdx++) {
+    // Rays always originate at the camera for now. In the future, they'll
+    // bounce around the scene.
+    vec3 rayOrigin = cameraOrigin;
+
+    const vec2 randomPixelCenter = vec2(pixel) + vec2(0.5) + 
+      0.375f * randomGaussian(rngState);
+
+    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / vec2(resolution);
+    screenUV.y = -screenUV.y;
+
+
+    vec3 rayDirection(fovVerticalSlope * screenUV, -1.0);
+    rayDirection = normalize(rayDirection);
+
+    // The amount of light that made it to the end of the current ray.
+    vec3 accumulatedRayColor(1);
+
+    // Limit the kernel to trace at most 32 segments.
+    for(int tracedSegments = 0; tracedSegments < 32; tracedSegments++) {
+      // Trace the ray and see if and where it intersects the scene!
+      // First, initialize a ray query object:
+      gl_rayQuery rayQuery;
+      gl_rayQueryInitialize(rayQuery,              // Ray query
+                            shader_tlas,           // Top-level acceleration structure
+                            gl_RayFlagsOpaque,     // Ray flags, here saying "treat all geometry as opaque"
+                            0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                            rayOrigin,             // Ray origin
+                            0.0,                   // Minimum t-value
+                            rayDirection,          // Ray direction
+                            10000.0);              // Maximum t-value
+      while(gl_rayQueryProceed(rayQuery));
+
+      // Get the type of committed (true) intersection - nothing, a triangle, or
+      // a generated object
+      if(gl_rayQueryGetIntersectionType(rayQuery, true) == 
+        gl_RayQueryCommittedIntersectionTriangle) {
+
+        // Get the ID of the shader:
+        const int sbtOffset = gl_rayQueryGetIntersectionInstanceShaderBindingTableRecordOffset(rayQuery, true);
+
+        // Ray hit a triangle
+        HitInfo hitInfo = getObjectHitInfo(rayQuery);
+        ReturnedInfo returnedInfo { };
+
+        // Instantiate the materials inside the shader.
+        materials_t mat;
+
+        switch(sbtOffset) {
+          @meta for(int i = 0; i < @member_count(materials_t); ++i) {
+            case i:
+              returnedInfo = mat.@member_value(i).sample(hitInfo, rngState);
+              break;
+          }
+        }
+
+        // Apply color absorption
+        accumulatedRayColor *= returnedInfo.color;
+
+        // Start a new segment
+        rayOrigin    = returnedInfo.rayOrigin;
+        rayDirection = returnedInfo.rayDirection;
+
+      } else {
+        // Ray hit the sky
+        accumulatedRayColor *= skyColor(rayDirection);
+
+        // Sum this with the pixel's other samples.
+        // (Note that we treat a ray that didn't find a light source as if it had
+        // an accumulated color of (0, 0, 0)).
+        summedPixelColor += accumulatedRayColor;
+
+        break;
+      }
+    }
+  }
+
+  vec3 averagePixelColor = summedPixelColor / shader_push.num_samples;
+  if(shader_push.sample_batch) {
+    const vec3 previousAverageColor = imageLoad(shader_image, pixel).rgb;
+    averagePixelColor = 
+      (shader_push.sample_batch * previousAverageColor + averagePixelColor) / 
+      (shader_push.sample_batch + 1);
+  }
+
+  // Set the color of the pixel `pixel` in the storage image to `averagePixelColor`:
+  imageStore(shader_image, pixel, vec4(averagePixelColor, 0.0));
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
@@ -55,6 +538,9 @@ VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
 
 int main(int argc, const char** argv)
 {
+  const int render_width = 800;
+  const int render_height = 600;
+
   // Create the Vulkan context, consisting of an instance, device, physical device, and queues.
   nvvk::ContextCreateInfo deviceInfo;  // One can modify this to load different extensions or pick the Vulkan core version
   deviceInfo.apiMajor = 1;             // Specify the version of Vulkan we'll use
@@ -152,7 +638,7 @@ int main(int argc, const char** argv)
   // Load the mesh of the first shape from an OBJ file
   std::vector<std::string> searchPaths = {
       PROJECT_ABSDIRECTORY,       PROJECT_ABSDIRECTORY "../",    PROJECT_ABSDIRECTORY "../../", PROJECT_RELDIRECTORY,
-      PROJECT_RELDIRECTORY "../", PROJECT_RELDIRECTORY "../../", PROJECT_NAME};
+      PROJECT_RELDIRECTORY "../", PROJECT_RELDIRECTORY "../../", PROJECT_NAME };
   tinyobj::ObjReader       reader;  // Used to read an OBJ file
   reader.ParseFromFile(nvh::findFile("scenes/CornellBox-Original-Merged.obj", searchPaths));
   assert(reader.Valid());  // Make sure tinyobj was able to parse this file
@@ -269,7 +755,10 @@ int main(int argc, const char** argv)
   std::vector<nvvk::RaytracingBuilderKHR::Instance> instances;
   std::default_random_engine                        randomEngine;  // The random number generator
   std::uniform_real_distribution<float>             uniformDist(-0.5f, 0.5f);
-  std::uniform_int_distribution<int>                uniformIntDist(0, 8);
+
+  int num_hitgroups = @member_count(my_materials_t);
+  std::uniform_int_distribution<int>                uniformIntDist(0, num_hitgroups - 1);
+
   for(int x = -10; x <= 10; x++)
   {
     for(int y = -10; y <= 10; y++)
@@ -296,10 +785,10 @@ int main(int argc, const char** argv)
   // 2 - a storage buffer (the vertex buffer)
   // 3 - a storage buffer (the index buffer)
   nvvk::DescriptorSetContainer descriptorSetContainer(context);
-  descriptorSetContainer.addBinding(BINDING_IMAGEDATA, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-  descriptorSetContainer.addBinding(BINDING_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-  descriptorSetContainer.addBinding(BINDING_VERTICES, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
-  descriptorSetContainer.addBinding(BINDING_INDICES, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_image, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_tlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_vertices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
+  descriptorSetContainer.addBinding(binding_indices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT);
   // Create a layout from the list of bindings
   descriptorSetContainer.initLayout();
   // Create a descriptor pool from the list of bindings with space for 1 set, and allocate that set
@@ -320,38 +809,38 @@ int main(int argc, const char** argv)
   VkDescriptorImageInfo descriptorImageInfo{};
   descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;  // The image's layout
   descriptorImageInfo.imageView   = imageView;                // How the image should be accessed
-  writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, BINDING_IMAGEDATA /*binding*/, &descriptorImageInfo);
+  writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, binding_image /*binding*/, &descriptorImageInfo);
   // Top-level acceleration structure (TLAS)
   VkWriteDescriptorSetAccelerationStructureKHR descriptorAS = nvvk::make<VkWriteDescriptorSetAccelerationStructureKHR>();
   VkAccelerationStructureKHR tlasCopy = raytracingBuilder.getAccelerationStructure();  // So that we can take its address
   descriptorAS.accelerationStructureCount = 1;
   descriptorAS.pAccelerationStructures    = &tlasCopy;
-  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, BINDING_TLAS, &descriptorAS);
+  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, binding_tlas, &descriptorAS);
   // Vertex buffer
   VkDescriptorBufferInfo vertexDescriptorBufferInfo{};
   vertexDescriptorBufferInfo.buffer = vertexBuffer.buffer;
   vertexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, BINDING_VERTICES, &vertexDescriptorBufferInfo);
+  writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, binding_vertices, &vertexDescriptorBufferInfo);
   // Index buffer
   VkDescriptorBufferInfo indexDescriptorBufferInfo{};
   indexDescriptorBufferInfo.buffer = indexBuffer.buffer;
   indexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, BINDING_INDICES, &indexDescriptorBufferInfo);
+  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, binding_indices, &indexDescriptorBufferInfo);
   vkUpdateDescriptorSets(context,                                            // The context
                          static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects
                          writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects
                          0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
   // Shader loading and pipeline creation
-  VkShaderModule rayTraceModule =
-      nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.comp.glsl.spv", true, searchPaths));
+  VkShaderModule rayTraceModule = nvvk::createShaderModule(context, 
+    __spirv_data, __spirv_size / 4);
   debugUtil.setObjectName(rayTraceModule, "rayTraceModule");
 
   // Describes the entrypoint and the stage to use for this shader module in the pipeline
   VkPipelineShaderStageCreateInfo shaderStageCreateInfo = nvvk::make<VkPipelineShaderStageCreateInfo>();
   shaderStageCreateInfo.stage                           = VK_SHADER_STAGE_COMPUTE_BIT;
   shaderStageCreateInfo.module                          = rayTraceModule;
-  shaderStageCreateInfo.pName                           = "main";
+  shaderStageCreateInfo.pName                           = @spirv(compute_shader<my_materials_t>);
 
   // Create the compute pipeline
   VkComputePipelineCreateInfo pipelineCreateInfo = nvvk::make<VkComputePipelineCreateInfo>();
@@ -367,6 +856,10 @@ int main(int argc, const char** argv)
   debugUtil.setObjectName(computePipeline, "computePipeline");
 
   const uint32_t NUM_SAMPLE_BATCHES = 32;
+  PushConstants pushConstants {
+    32, 0
+  };
+
   for(uint32_t sampleBatch = 0; sampleBatch < NUM_SAMPLE_BATCHES; sampleBatch++)
   {
     // Create and start recording a command buffer
@@ -389,8 +882,12 @@ int main(int argc, const char** argv)
                        &pushConstants);                         // Data
 
     // Run the compute shader with enough workgroups to cover the entire buffer:
-    vkCmdDispatch(cmdBuffer, (render_width + WORKGROUP_WIDTH - 1) / WORKGROUP_WIDTH,
-                  (render_height + WORKGROUP_HEIGHT - 1) / WORKGROUP_HEIGHT, 1);
+    vkCmdDispatch(
+      cmdBuffer, 
+      div_up(render_width, workgroup_width), 
+      div_up(render_height, workgroup_height),
+      1
+    );
 
     // On the last sample batch:
     if(sampleBatch == NUM_SAMPLE_BATCHES - 1)
