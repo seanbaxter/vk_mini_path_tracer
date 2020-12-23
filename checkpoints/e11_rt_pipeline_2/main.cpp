@@ -107,7 +107,7 @@ void rgen_shader() {
     const vec2 randomPixelCenter = vec2(pixel) + vec2(0.5) + 
       0.375f * randomGaussian(shader_pld.rngState);
 
-    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / vec2(resolution);
+    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / resolution.y;
     screenUV.y = -screenUV.y;
 
     vec3 rayDirection(fovVerticalSlope * screenUV, -1.0);

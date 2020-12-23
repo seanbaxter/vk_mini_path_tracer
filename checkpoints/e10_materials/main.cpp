@@ -14,7 +14,7 @@
 #include <nvvk/raytraceKHR_vk.hpp>     // For nvvk::RaytracingBuilderKHR
 #include <nvvk/shaders_vk.hpp>         // For nvvk::createShaderModule
 #include <nvvk/structs_vk.hpp>         // For nvvk::make
-
+ 
 constexpr int div_up(int x, int y) {
   return (x + y - 1) / y;
 }
@@ -64,8 +64,7 @@ inline float stepAndOutputRNGFloat(uint& rngState) {
 
 // Uses the Box-Muller transform to return a normally distributed (centered
 // at 0, standard deviation 1) 2D point.
-inline vec2 randomGaussian(uint& rngState)
-{
+inline vec2 randomGaussian(uint& rngState) {
   // Almost uniform in (0, 1] - make sure the value is never 0:
   const float u1    = max(1e-38f, stepAndOutputRNGFloat(rngState));
   const float u2    = stepAndOutputRNGFloat(rngState);  // In [0, 1]
@@ -75,8 +74,7 @@ inline vec2 randomGaussian(uint& rngState)
 }
 
 // Returns the color of the sky in a given direction (in linear color space)
-inline vec3 skyColor(vec3 direction)
-{
+inline vec3 skyColor(vec3 direction) {
   return (direction.y > 0) ?
     mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y) :
     vec3(0.03f);
@@ -415,7 +413,7 @@ void compute_shader() {
     const vec2 randomPixelCenter = vec2(pixel) + vec2(0.5) + 
       0.375f * randomGaussian(rngState);
 
-    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / vec2(resolution);
+    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / resolution.y;
     screenUV.y = -screenUV.y;
 
 

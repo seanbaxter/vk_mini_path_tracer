@@ -154,7 +154,7 @@ void compute_shader() {
     const vec2 randomPixelCenter = vec2(pixel) + vec2(0.5) + 
       0.375f * randomGaussian(rngState);
 
-    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / vec2(resolution);
+    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / resolution.y;
     screenUV.y = -screenUV.y;
 
 
@@ -235,6 +235,8 @@ void compute_shader() {
   // Set the color of the pixel `pixel` in the storage image to `averagePixelColor`:
   imageStore(shader_image, pixel, vec4(averagePixelColor, 0.0));
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
