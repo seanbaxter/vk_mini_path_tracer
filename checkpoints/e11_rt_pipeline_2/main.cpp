@@ -39,8 +39,11 @@ struct PassableInfo
 [[spirv::push]]
 PushConstants shader_push;
 
-[[using spirv: rayPayloadIn, location(0)]] 
+[[using spirv: rayPayload, location(0)]] 
 PassableInfo shader_pld;
+
+[[using spirv: rayPayloadIn, location(0)]] 
+PassableInfo shader_pld_in;
 
 [[spirv::hitAttribute]]
 vec2 shader_hit_attributes;
@@ -170,8 +173,8 @@ inline vec3 skyColor(vec3 direction) {
 void rmiss_shader() {
   // Returns the color of the sky in a given direction (in linear color space)
   // +y in world space is up, so:
-  shader_pld.color = skyColor(glray_WorldRayDirection);
-  shader_pld.rayHitSky = true;
+  shader_pld_in.color = skyColor(glray_WorldRayDirection);
+  shader_pld_in.rayHitSky = true;
 }
 
 inline vec3 offsetPositionAlongNormal(vec3 worldPosition, vec3 normal)
@@ -278,12 +281,12 @@ void rchit_shader() {
   HitInfo hitInfo = getObjectHitInfo();
   
   material_t mat;
-  ReturnedInfo returned = mat.sample(hitInfo, shader_pld.rngState);
+  ReturnedInfo returned = mat.sample(hitInfo, shader_pld_in.rngState);
   
-  shader_pld.color        = returned.color;
-  shader_pld.rayOrigin    = returned.rayOrigin;
-  shader_pld.rayDirection = returned.rayDirection;
-  shader_pld.rayHitSky    = false;
+  shader_pld_in.color        = returned.color;
+  shader_pld_in.rayOrigin    = returned.rayOrigin;
+  shader_pld_in.rayDirection = returned.rayDirection;
+  shader_pld_in.rayHitSky    = false;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -611,7 +614,7 @@ int main(int argc, const char** argv) {
   // Create a push constant range describing the amount of data for the push constants.
   static_assert(sizeof(PushConstants) % 4 == 0, "Push constant size must be a multiple of 4 per the Vulkan spec!");
   VkPushConstantRange pushConstantRange;
-  pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+  pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
   pushConstantRange.offset     = 0;
   pushConstantRange.size       = sizeof(PushConstants);
   // Create a pipeline layout from the descriptor set layout and push constant range:
