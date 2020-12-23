@@ -34,8 +34,7 @@ vec3 shader_vertices[];
 uint shader_indices[];
 
 // Steps the RNG and returns a floating-point value between 0 and 1 inclusive.
-inline float stepAndOutputRNGFloat(uint& rngState)
-{
+inline float stepAndOutputRNGFloat(uint& rngState) {
   // Condensed version of pcg_output_rxs_m_xs_32_32, with simple conversion to floating-point [0,1].
   rngState  = rngState * 747796405 + 1;
   uint word = ((rngState >> ((rngState >> 28) + 4)) ^ rngState) * 277803737;
@@ -44,17 +43,10 @@ inline float stepAndOutputRNGFloat(uint& rngState)
 }
 
 // Returns the color of the sky in a given direction (in linear color space)
-inline vec3 skyColor(vec3 direction)
-{
-  // +y in world space is up, so:
-  if(direction.y > 0.0f)
-  {
-    return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
-  }
-  else
-  {
-    return vec3(0.03f);
-  }
+inline vec3 skyColor(vec3 direction) {
+  return (direction.y > 0) ?
+    mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y) :
+    vec3(0.03f);
 }
 
 struct HitInfo
@@ -112,7 +104,7 @@ void compute_shader() {
   const float fovVerticalSlope = 1.0 / 5.0;
 
   // The sum of the colors of all of the samples.
-  vec3 summedPixelColor (0.0);
+  vec3 summedPixelColor(0.0);
 
   // Limit the kernel to trace at most 64 samples.
   for(int sampleIdx = 0; sampleIdx < NUM_SAMPLES; sampleIdx++)
@@ -125,9 +117,8 @@ void compute_shader() {
     const vec2 randomPixelCenter = vec2(pixel) + 
       vec2(stepAndOutputRNGFloat(rngState), stepAndOutputRNGFloat(rngState));
 
-    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / vec2(resolution);
+    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / resolution.y;
     screenUV.y = -screenUV.y;
-
 
     vec3 rayDirection(fovVerticalSlope * screenUV, -1.0);
     rayDirection = normalize(rayDirection);

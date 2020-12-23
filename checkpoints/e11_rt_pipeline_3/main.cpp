@@ -208,8 +208,7 @@ inline vec3 diffuseReflection(vec3 normal, uint& rngState)
   return normalize(direction);
 }
 
-struct HitInfo
-{
+struct HitInfo {
   vec3 objectPosition;  // The intersection position in object-space.
   vec3 worldPosition;   // The intersection position in world-space.
   vec3 worldNormal;     // The double-sided triangle normal in world-space.
@@ -217,8 +216,7 @@ struct HitInfo
   int primitiveID;
 };
 
-struct ReturnedInfo
-{
+struct ReturnedInfo {
   vec3 color;         // The reflectivity of the surface.
   vec3 rayOrigin;     // The new ray origin in world-space.
   vec3 rayDirection;  // The new ray direction in world-space.
@@ -381,7 +379,7 @@ struct material6_t {
 struct material7_t {
   ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
     ReturnedInfo result;
-    result.color        = clamp(hit.primitiveID / vec3(36, 9, 18), 0.f, 1.f);
+    result.color        = clamp(vec3(hit.primitiveID) / vec3(36, 9, 18), 0.f, 1.f);
     result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
     result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
     return result;
@@ -410,12 +408,12 @@ struct material8_t {
 };
 
 inline HitInfo getObjectHitInfo() {
-  HitInfo hit;
+  HitInfo hit { };
 
-  // Get the ID of the triangle
+  // Get the ID of the triangle.
   hit.primitiveID = glray_PrimitiveID;
 
-  // Get the indices of the vertices of the triangle
+  // Get the indices of the vertices of the triangle.
   uint i0 = shader_indices[3 * hit.primitiveID + 0];
   uint i1 = shader_indices[3 * hit.primitiveID + 1];
   uint i2 = shader_indices[3 * hit.primitiveID + 2];
@@ -509,8 +507,8 @@ VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
 
 int main(int argc, const char** argv)
 {
-  const uint32_t render_width  = 800;
-  const uint32_t render_height = 600;
+  const uint32_t render_width  = 3000;
+  const uint32_t render_height = 2000;
 
   // Create the Vulkan context, consisting of an instance, device, physical device, and queues.
   nvvk::ContextCreateInfo deviceInfo;  // One can modify this to load different extensions or pick the Vulkan core version
@@ -753,11 +751,13 @@ int main(int argc, const char** argv)
   raytracingBuilder.buildBlas(blases, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
                                           | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR);
 
+  const size_t NUM_C_HIT_SHADERS = @enum_count(my_materials_t);
+
   // Create 441 instances with random rotations pointing to BLAS 0, and build these instances into a TLAS:
   std::vector<nvvk::RaytracingBuilderKHR::Instance> instances;
   std::default_random_engine                        randomEngine;  // The random number generator
   std::uniform_real_distribution<float>             uniformDist(-0.5f, 0.5f);
-  std::uniform_int_distribution<int>                uniformIntDist(0, 8);
+  std::uniform_int_distribution<int>                uniformIntDist(0, NUM_C_HIT_SHADERS - 1);
   for(int x = -10; x <= 10; x++)
   {
     for(int y = -10; y <= 10; y++)
@@ -831,8 +831,6 @@ int main(int argc, const char** argv)
                          0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
   // Shader loading and pipeline creation
-  const size_t NUM_C_HIT_SHADERS = @enum_count(my_materials_t);
-
   VkShaderModule module = nvvk::createShaderModule(context, 
     __spirv_data, __spirv_size / 4);
 
