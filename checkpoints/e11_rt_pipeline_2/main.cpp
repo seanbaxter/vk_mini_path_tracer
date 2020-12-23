@@ -15,11 +15,278 @@
 #include <nvvk/shaders_vk.hpp>         // For nvvk::createShaderModule
 #include <nvvk/structs_vk.hpp>         // For nvvk::make
 
-#include "common.h"
+enum bindings {
+  binding_image     = 0,
+  binding_tlas      = 1,
+  binding_vertices  = 2,
+  binding_indices   = 3,
+};
 
-PushConstants  pushConstants;
-const uint32_t render_width  = 800;
-const uint32_t render_height = 600;
+struct PushConstants {
+  int num_samples;
+  int sample_batch;
+};
+
+struct PassableInfo
+{
+  vec3 color;         // The reflectivity of the surface.
+  vec3 rayOrigin;     // The new ray origin in world-space.
+  vec3 rayDirection;  // The new ray direction in world-space.
+  uint rngState;      // State of the random number generator.
+  bool rayHitSky;     // True if the ray hit the sky.
+};
+
+[[spirv::push]]
+PushConstants shader_push;
+
+[[using spirv: rayPayloadIn, location(0)]] 
+PassableInfo shader_pld;
+
+[[spirv::hitAttribute]]
+vec2 shader_hit_attributes;
+
+[[using spirv: uniform, format(rgba32f), binding(binding_image)]]
+image2D shader_image;
+
+[[using spirv: uniform, binding(binding_tlas)]]
+accelerationStructure shader_tlas;
+
+[[using spirv: buffer, binding(binding_vertices)]]
+vec3 shader_vertices[];
+
+[[using spirv: buffer, binding(binding_indices)]]
+uint shader_indices[];
+
+// Steps the RNG and returns a floating-point value between 0 and 1 inclusive.
+inline float stepAndOutputRNGFloat(uint& rngState) {
+  // Condensed version of pcg_output_rxs_m_xs_32_32, with simple conversion to floating-point [0,1].
+  rngState  = rngState * 747796405 + 1;
+  uint word = ((rngState >> ((rngState >> 28) + 4)) ^ rngState) * 277803737;
+  word      = (word >> 22) ^ word;
+  return float(word) / 4294967295.0f;
+}
+
+// Uses the Box-Muller transform to return a normally distributed (centered
+// at 0, standard deviation 1) 2D point.
+inline vec2 randomGaussian(uint& rngState) {
+  // Almost uniform in (0, 1] - make sure the value is never 0:
+  const float u1    = max(1e-38f, stepAndOutputRNGFloat(rngState));
+  const float u2    = stepAndOutputRNGFloat(rngState);  // In [0, 1]
+  const float r     = sqrt(-2 * log(u1));
+  const float theta = 2 * M_PIf32 * u2;  // Random in [0, 2pi]
+  return r * vec2(cos(theta), sin(theta));
+}
+
+[[spirv::rgen]]
+void rgen_shader() {
+  const ivec2 resolution = imageSize(shader_image);
+  const ivec2 pixel = ivec2(glray_LaunchID.xy);
+
+  if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
+    return;
+
+  // State of the random number generator.
+  shader_pld.rngState = 
+    (shader_push.sample_batch * resolution.y + pixel.y) * resolution.x + pixel.x; 
+
+  const vec3 cameraOrigin = vec3(-0.001, 0, 53.0);
+  const float fovVerticalSlope = 1.0 / 5.0;
+
+  // The sum of the colors of all of the samples.
+  vec3 summedPixelColor(0.0);
+
+  // Limit the kernel to trace at most 64 samples.
+  for(int sampleIdx = 0; sampleIdx < shader_push.num_samples; sampleIdx++) {
+    // Rays always originate at the camera for now. In the future, they'll
+    // bounce around the scene.
+    vec3 rayOrigin = cameraOrigin;
+
+    const vec2 randomPixelCenter = vec2(pixel) + vec2(0.5) + 
+      0.375f * randomGaussian(shader_pld.rngState);
+
+    vec2 screenUV = vec2(2 * randomPixelCenter + 1 - vec2(resolution)) / vec2(resolution);
+    screenUV.y = -screenUV.y;
+
+    vec3 rayDirection(fovVerticalSlope * screenUV, -1.0);
+    rayDirection = normalize(rayDirection);
+
+    // The amount of light that made it to the end of the current ray.
+    vec3 accumulatedRayColor(1);
+
+    // Limit the kernel to trace at most 32 segments.
+    for(int tracedSegments = 0; tracedSegments < 32; tracedSegments++) {
+      // Trace the ray into the scene and get data back!
+      glray_Trace(shader_tlas,           // Top-level acceleration structure
+                  gl_RayFlagsOpaque,     // Ray flags, here saying "treat all geometry as opaque"
+                  0xFF,                  // 8-bit instance mask, here saying "trace against all instances"
+                  0,                     // SBT record offset
+                  0,                     // SBT record stride for offset
+                  0,                     // Miss index
+                  rayOrigin,             // Ray origin
+                  0.0,                   // Minimum t-value
+                  rayDirection,          // Ray direction
+                  10000.0,               // Maximum t-value
+                  0);                    // Location of payload
+
+      // Compute the amount of light that returns to this sample from the ray
+      accumulatedRayColor *= shader_pld.color;
+
+      if(shader_pld.rayHitSky)
+      {
+        // Done tracing this ray.
+        // Sum this with the pixel's other samples.
+        // (Note that we treat a ray that didn't find a light source as if it had
+        // an accumulated color of (0, 0, 0)).
+        summedPixelColor += accumulatedRayColor;
+        break;
+
+      } else {
+        // Start a new segment
+        rayOrigin    = shader_pld.rayOrigin;
+        rayDirection = shader_pld.rayDirection;
+      }
+    }
+  }
+
+  vec3 averagePixelColor = summedPixelColor / shader_push.num_samples;
+  if(shader_push.sample_batch) {
+    const vec3 previousAverageColor = imageLoad(shader_image, pixel).rgb;
+    averagePixelColor = 
+      (shader_push.sample_batch * previousAverageColor + averagePixelColor) / 
+      (shader_push.sample_batch + 1);
+  }
+
+  // Set the color of the pixel `pixel` in the storage image to `averagePixelColor`:
+  imageStore(shader_image, pixel, vec4(averagePixelColor, 0.0));
+}
+
+inline vec3 skyColor(vec3 direction) {
+  return (direction.y > 0) ?
+    mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y) :
+    vec3(0.03f);
+}
+
+[[spirv::rmiss]]
+void rmiss_shader() {
+  // Returns the color of the sky in a given direction (in linear color space)
+  // +y in world space is up, so:
+  shader_pld.color = skyColor(glray_WorldRayDirection);
+  shader_pld.rayHitSky = true;
+}
+
+inline vec3 offsetPositionAlongNormal(vec3 worldPosition, vec3 normal)
+{
+  // Convert the normal to an integer offset.
+  const float int_scale = 256.0f;
+  const ivec3 of_i      = ivec3(int_scale * normal);
+
+  // Offset each component of worldPosition using its binary representation.
+  // Handle the sign bits correctly.
+  const vec3 p_i = intBitsToFloat(floatBitsToInt(worldPosition) + ((worldPosition < 0) ? -of_i : of_i));
+
+  // Use a floating-point offset instead for points near (0,0,0), the origin.
+  const float origin     = 1.0f / 32.0f;
+  const float floatScale = 1.0f / 65536.0f;
+  return abs(worldPosition) < origin ? worldPosition + floatScale * normal : p_i;
+}
+
+inline vec3 diffuseReflection(vec3 normal, uint& rngState)
+{
+  // For a random diffuse bounce direction, we follow the approach of
+  // Ray Tracing in One Weekend, and generate a random point on a sphere
+  // of radius 1 centered at the normal. This uses the random_unit_vector
+  // function from chapter 8.5:
+  const float theta     = 2 * M_PIf32 * stepAndOutputRNGFloat(rngState);  // Random in [0, 2pi]
+  const float u         = 2 * stepAndOutputRNGFloat(rngState) - 1;   // Random in [-1, 1]
+  const float r         = sqrt(1 - u * u);
+  const vec3  direction = normal + vec3(r * cos(theta), r * sin(theta), u);
+
+  // Then normalize the ray direction:
+  return normalize(direction);
+}
+
+struct HitInfo
+{
+  vec3 objectPosition;  // The intersection position in object-space.
+  vec3 worldPosition;   // The intersection position in world-space.
+  vec3 worldNormal;     // The double-sided triangle normal in world-space.
+  vec3 rayDirection;    // Direction of incoming ray.
+  int primitiveID;
+};
+
+struct ReturnedInfo
+{
+  vec3 color;         // The reflectivity of the surface.
+  vec3 rayOrigin;     // The new ray origin in world-space.
+  vec3 rayDirection;  // The new ray direction in world-space.
+};
+
+// Diffuse reflection off a 70% reflective surface (what we've used for most
+// of this tutorial)
+struct material0_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color = color;
+    result.rayOrigin = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+    result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+};
+
+inline HitInfo getObjectHitInfo() {
+  HitInfo hit;
+
+  // Get the ID of the triangle
+  hit.primitiveID = glray_PrimitiveID;
+
+  // Get the indices of the vertices of the triangle
+  uint i0 = shader_indices[3 * hit.primitiveID + 0];
+  uint i1 = shader_indices[3 * hit.primitiveID + 1];
+  uint i2 = shader_indices[3 * hit.primitiveID + 2];
+
+  // Get the vertices of the triangle
+  vec3 v0 = shader_vertices[i0];
+  vec3 v1 = shader_vertices[i1];
+  vec3 v2 = shader_vertices[i2];
+
+  // Get the barycentric coordinates of the intersection
+  vec3 barycentrics;
+  barycentrics.yz = shader_hit_attributes;
+  barycentrics.x = 1 - barycentrics.y - barycentrics.z;
+
+  // Compute the coordinates of the intersection
+  hit.objectPosition = v0 * barycentrics.x + v1 * barycentrics.y + v2 * barycentrics.z;
+
+  // Transform from object space to world space:
+  hit.worldPosition = glray_ObjectToWorld * vec4(hit.objectPosition, 1);
+
+  vec3 objectNormal = cross(v1 - v0, v2 - v0);
+  hit.worldNormal = normalize((objectNormal * glray_WorldToObject).xyz);
+
+  hit.rayDirection = glray_WorldRayDirection;
+  hit.worldNormal = faceforward(hit.worldNormal, hit.rayDirection,
+    hit.worldNormal);
+
+  return hit;
+}
+
+template<typename material_t>
+[[spirv::rchit]]
+void rchit_shader() {
+  HitInfo hitInfo = getObjectHitInfo();
+  
+  material_t mat;
+  ReturnedInfo returned = mat.sample(hitInfo, shader_pld.rngState);
+  
+  shader_pld.color        = returned.color;
+  shader_pld.rayOrigin    = returned.rayOrigin;
+  shader_pld.rayDirection = returned.rayDirection;
+  shader_pld.rayHitSky    = false;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
@@ -53,8 +320,10 @@ VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
   return vkGetBufferDeviceAddress(device, &addressInfo);
 }
 
-int main(int argc, const char** argv)
-{
+int main(int argc, const char** argv) {
+  const uint32_t render_width  = 800;
+  const uint32_t render_height = 600;
+
   // Create the Vulkan context, consisting of an instance, device, physical device, and queues.
   nvvk::ContextCreateInfo deviceInfo;  // One can modify this to load different extensions or pick the Vulkan core version
   deviceInfo.apiMajor = 1;             // Specify the version of Vulkan we'll use
@@ -180,6 +449,7 @@ int main(int argc, const char** argv)
                                                                | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
   debugUtil.setObjectName(imageLinear.image, "imageLinear");
 
+
   // Load the mesh of the first shape from an OBJ file
   std::vector<std::string> searchPaths = {
       PROJECT_ABSDIRECTORY,       PROJECT_ABSDIRECTORY "../",    PROJECT_ABSDIRECTORY "../../", PROJECT_RELDIRECTORY,
@@ -205,6 +475,7 @@ int main(int argc, const char** argv)
   VkCommandPool cmdPool;
   NVVK_CHECK(vkCreateCommandPool(context, &cmdPoolInfo, nullptr, &cmdPool));
   debugUtil.setObjectName(cmdPool, "cmdPool");
+
 
   // Upload the vertex and index buffers to the GPU.
   nvvk::BufferDedicated vertexBuffer, indexBuffer;
@@ -258,6 +529,7 @@ int main(int argc, const char** argv)
     EndSubmitWaitAndFreeCommandBuffer(context, context.m_queueGCT, cmdPool, uploadCmdBuffer);
     allocator.finalizeAndReleaseStaging();
   }
+
 
   // Describe the bottom-level acceleration structure (BLAS)
   std::vector<nvvk::RaytracingBuilderKHR::BlasInput> blases;
@@ -321,16 +593,17 @@ int main(int argc, const char** argv)
   }
   raytracingBuilder.buildTlas(instances, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
 
+
   // Here's the list of bindings for the descriptor set layout, from raytrace.comp.glsl:
   // 0 - a storage image (the image `image`)
   // 1 - an acceleration structure (the TLAS)
   // 2 - a storage buffer (the vertex buffer)
   // 3 - a storage buffer (the index buffer)
   nvvk::DescriptorSetContainer descriptorSetContainer(context);
-  descriptorSetContainer.addBinding(BINDING_IMAGEDATA, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-  descriptorSetContainer.addBinding(BINDING_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-  descriptorSetContainer.addBinding(BINDING_VERTICES, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
-  descriptorSetContainer.addBinding(BINDING_INDICES, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_image, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_tlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_vertices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_indices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
   // Create a layout from the list of bindings
   descriptorSetContainer.initLayout();
   // Create a descriptor pool from the list of bindings with space for 1 set, and allocate that set
@@ -338,7 +611,7 @@ int main(int argc, const char** argv)
   // Create a push constant range describing the amount of data for the push constants.
   static_assert(sizeof(PushConstants) % 4 == 0, "Push constant size must be a multiple of 4 per the Vulkan spec!");
   VkPushConstantRange pushConstantRange;
-  pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+  pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
   pushConstantRange.offset     = 0;
   pushConstantRange.size       = sizeof(PushConstants);
   // Create a pipeline layout from the descriptor set layout and push constant range:
@@ -351,37 +624,33 @@ int main(int argc, const char** argv)
   VkDescriptorImageInfo descriptorImageInfo{};
   descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;  // The image's layout
   descriptorImageInfo.imageView   = imageView;                // How the image should be accessed
-  writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, BINDING_IMAGEDATA /*binding*/, &descriptorImageInfo);
+  writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, binding_image /*binding*/, &descriptorImageInfo);
   // Top-level acceleration structure (TLAS)
   VkWriteDescriptorSetAccelerationStructureKHR descriptorAS = nvvk::make<VkWriteDescriptorSetAccelerationStructureKHR>();
   VkAccelerationStructureKHR tlasCopy = raytracingBuilder.getAccelerationStructure();  // So that we can take its address
   descriptorAS.accelerationStructureCount = 1;
   descriptorAS.pAccelerationStructures    = &tlasCopy;
-  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, BINDING_TLAS, &descriptorAS);
+  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, binding_tlas, &descriptorAS);
   // Vertex buffer
   VkDescriptorBufferInfo vertexDescriptorBufferInfo{};
   vertexDescriptorBufferInfo.buffer = vertexBuffer.buffer;
   vertexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, BINDING_VERTICES, &vertexDescriptorBufferInfo);
+  writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, binding_vertices, &vertexDescriptorBufferInfo);
   // Index buffer
   VkDescriptorBufferInfo indexDescriptorBufferInfo{};
   indexDescriptorBufferInfo.buffer = indexBuffer.buffer;
   indexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, BINDING_INDICES, &indexDescriptorBufferInfo);
+  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, binding_indices, &indexDescriptorBufferInfo);
   vkUpdateDescriptorSets(context,                                            // The context
                          static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects
                          writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects
                          0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
+
   // Shader loading and pipeline creation
   const size_t                                      NUM_C_HIT_SHADERS = 1;
-  std::array<VkShaderModule, 2 + NUM_C_HIT_SHADERS> modules;
-  modules[0] = nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.rgen.glsl.spv", true, searchPaths));
-  debugUtil.setObjectName(modules[0], "Ray generation module (raytrace.rgen.glsl.spv)");
-  modules[1] = nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.rmiss.glsl.spv", true, searchPaths));
-  debugUtil.setObjectName(modules[1], "Miss module (raytrace.rmiss.glsl.spv)");
-  modules[2] = nvvk::createShaderModule(context, nvh::loadFile("shaders/material0.rchit.glsl.spv", true, searchPaths));
-  debugUtil.setObjectName(modules[2], "Material 0 shader module");
+  VkShaderModule module = nvvk::createShaderModule(context, 
+    __spirv_data, __spirv_size / 4);
 
   // Create the shader binding table and ray tracing pipeline.
   // We'll create the ray tracing pipeline by specifying the shaders + layout,
@@ -399,16 +668,18 @@ int main(int argc, const char** argv)
     // Stage 0 will be the raygen shader.
     stages[0]        = nvvk::make<VkPipelineShaderStageCreateInfo>();
     stages[0].stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;  // Kind of shader
-    stages[0].module = modules[0];                      // Contains the shader
-    stages[0].pName  = "main";                          // Name of the entry point
+    stages[0].module = module;                      // Contains the shader
+    stages[0].pName  = @spirv(rgen_shader);             // Name of the entry point
+    
     // Stage 1 will be the miss shader.
     stages[1]        = stages[0];
     stages[1].stage  = VK_SHADER_STAGE_MISS_BIT_KHR;  // Kind of shader
-    stages[1].module = modules[1];                    // Contains the shader
+    stages[1].pName  = @spirv(rmiss_shader);
+
     // Stage 2 will be the closest-hit shader.
     stages[2]        = stages[0];
     stages[2].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;  // Kind of shader
-    stages[2].module = modules[2];                           // Contains the shader
+    stages[2].pName  = @spirv(rchit_shader<material0_t>);
 
     // Then we make groups point to the shader stages. Each group can point to
     // 1-3 shader stages depending on the type, by specifying the index in the
@@ -428,6 +699,7 @@ int main(int argc, const char** argv)
     // A VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR group type
     // is for a procedural instance, and can point to an intersection, any hit,
     // and closest hit shader.
+
 
     // We lay out our shader binding table like this:
     // RAY GEN REGION
@@ -461,7 +733,9 @@ int main(int argc, const char** argv)
                                               1, &pipelineCreateInfo,  // Array of create infos
                                               nullptr,                 // Allocator
                                               &rtPipeline));
+
     debugUtil.setObjectName(rtPipeline, "rtPipeline");
+
 
     // Now create and write the shader binding table, by getting the shader
     // group handles from the ray tracing pipeline and writing them into a
@@ -494,6 +768,7 @@ int main(int argc, const char** argv)
     allocator.finalizeAndReleaseStaging();
   }
 
+
   // vkCmdTraceRaysKHR uses VkStridedDeviceAddressregionKHR objects to say
   // where each block of shaders is held in memory. These could change per
   // draw call, but let's create them up front since they're the same
@@ -519,6 +794,11 @@ int main(int argc, const char** argv)
   }
 
   const uint32_t NUM_SAMPLE_BATCHES = 32;
+
+  PushConstants pushConstants {
+    4, 0
+  };
+
   for(uint32_t sampleBatch = 0; sampleBatch < NUM_SAMPLE_BATCHES; sampleBatch++)
   {
     // Create and start recording a command buffer
@@ -622,10 +902,8 @@ int main(int argc, const char** argv)
 
   allocator.destroy(rtSBTBuffer);
   vkDestroyPipeline(context, rtPipeline, nullptr);
-  for(VkShaderModule& shaderModule : modules)
-  {
-    vkDestroyShaderModule(context, shaderModule, nullptr);
-  }
+  vkDestroyShaderModule(context, module, nullptr);
+  
   descriptorSetContainer.deinit();
   raytracingBuilder.destroy();
   allocator.destroy(vertexBuffer);

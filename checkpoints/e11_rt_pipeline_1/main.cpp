@@ -15,11 +15,46 @@
 #include <nvvk/shaders_vk.hpp>         // For nvvk::createShaderModule
 #include <nvvk/structs_vk.hpp>         // For nvvk::make
 
-#include "common.h"
+enum bindings {
+  binding_image     = 0,
+  binding_tlas      = 1,
+  binding_vertices  = 2,
+  binding_indices   = 3,
+};
 
-PushConstants  pushConstants;
-const uint32_t render_width  = 800;
-const uint32_t render_height = 600;
+struct PushConstants {
+  uint sample_batch;
+};
+
+[[using spirv: uniform, format(rgba32f), binding(binding_image)]]
+image2D shader_image;
+
+[[spirv::rgen]]
+void rgen_shader() {
+  // The resolution of the image, which is the same as the launch size:
+  const ivec2 resolution = imageSize(shader_image);
+
+  // Get the coordinates of the pixel for this invocation:
+  //
+  // .-------.-> x
+  // |       |
+  // |       |
+  // '-------'
+  // v
+  // y
+  const ivec2 pixel = ivec2(glray_LaunchID.xy);
+
+  // If the pixel is outside of the image, don't do anything:
+  if((pixel.x >= resolution.x) || (pixel.y >= resolution.y))
+    return;
+
+  // Set the color of the pixel `pixel` in the storage image as follows:
+  vec4 color = vec4(pixel.x / float(resolution.x),  //
+                    pixel.y / float(resolution.y),  //
+                    0.0,                            //
+                    0.0);
+  imageStore(shader_image, pixel, color);
+}
 
 VkCommandBuffer AllocateAndBeginOneTimeCommandBuffer(VkDevice device, VkCommandPool cmdPool)
 {
@@ -55,6 +90,9 @@ VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
 
 int main(int argc, const char** argv)
 {
+  const uint32_t render_width  = 800;
+  const uint32_t render_height = 600;
+
   // Create the Vulkan context, consisting of an instance, device, physical device, and queues.
   nvvk::ContextCreateInfo deviceInfo;  // One can modify this to load different extensions or pick the Vulkan core version
   deviceInfo.apiMajor = 1;             // Specify the version of Vulkan we'll use
@@ -327,10 +365,10 @@ int main(int argc, const char** argv)
   // 2 - a storage buffer (the vertex buffer)
   // 3 - a storage buffer (the index buffer)
   nvvk::DescriptorSetContainer descriptorSetContainer(context);
-  descriptorSetContainer.addBinding(BINDING_IMAGEDATA, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-  descriptorSetContainer.addBinding(BINDING_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-  descriptorSetContainer.addBinding(BINDING_VERTICES, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
-  descriptorSetContainer.addBinding(BINDING_INDICES, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_image, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_tlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_vertices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+  descriptorSetContainer.addBinding(binding_indices, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
   // Create a layout from the list of bindings
   descriptorSetContainer.initLayout();
   // Create a descriptor pool from the list of bindings with space for 1 set, and allocate that set
@@ -351,31 +389,31 @@ int main(int argc, const char** argv)
   VkDescriptorImageInfo descriptorImageInfo{};
   descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;  // The image's layout
   descriptorImageInfo.imageView   = imageView;                // How the image should be accessed
-  writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, BINDING_IMAGEDATA /*binding*/, &descriptorImageInfo);
+  writeDescriptorSets[0] = descriptorSetContainer.makeWrite(0 /*set index*/, binding_image /*binding*/, &descriptorImageInfo);
   // Top-level acceleration structure (TLAS)
   VkWriteDescriptorSetAccelerationStructureKHR descriptorAS = nvvk::make<VkWriteDescriptorSetAccelerationStructureKHR>();
   VkAccelerationStructureKHR tlasCopy = raytracingBuilder.getAccelerationStructure();  // So that we can take its address
   descriptorAS.accelerationStructureCount = 1;
   descriptorAS.pAccelerationStructures    = &tlasCopy;
-  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, BINDING_TLAS, &descriptorAS);
+  writeDescriptorSets[1]                  = descriptorSetContainer.makeWrite(0, binding_tlas, &descriptorAS);
   // Vertex buffer
   VkDescriptorBufferInfo vertexDescriptorBufferInfo{};
   vertexDescriptorBufferInfo.buffer = vertexBuffer.buffer;
   vertexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, BINDING_VERTICES, &vertexDescriptorBufferInfo);
+  writeDescriptorSets[2] = descriptorSetContainer.makeWrite(0, binding_vertices, &vertexDescriptorBufferInfo);
   // Index buffer
   VkDescriptorBufferInfo indexDescriptorBufferInfo{};
   indexDescriptorBufferInfo.buffer = indexBuffer.buffer;
   indexDescriptorBufferInfo.range  = VK_WHOLE_SIZE;
-  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, BINDING_INDICES, &indexDescriptorBufferInfo);
+  writeDescriptorSets[3]           = descriptorSetContainer.makeWrite(0, binding_indices, &indexDescriptorBufferInfo);
   vkUpdateDescriptorSets(context,                                            // The context
                          static_cast<uint32_t>(writeDescriptorSets.size()),  // Number of VkWriteDescriptorSet objects
                          writeDescriptorSets.data(),                         // Pointer to VkWriteDescriptorSet objects
                          0, nullptr);  // An array of VkCopyDescriptorSet objects (unused)
 
   // Shader loading and pipeline creation
-  VkShaderModule rayGenModule =
-      nvvk::createShaderModule(context, nvh::loadFile("shaders/raytrace.rgen.glsl.spv", true, searchPaths));
+  VkShaderModule rayGenModule = nvvk::createShaderModule(context, 
+    __spirv_data, __spirv_size / 4);
   debugUtil.setObjectName(rayGenModule, "rayGenModule");
 
   // Create the shader binding table and ray tracing pipeline.
@@ -395,7 +433,7 @@ int main(int argc, const char** argv)
     stages[0]        = nvvk::make<VkPipelineShaderStageCreateInfo>();
     stages[0].stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;  // Kind of shader
     stages[0].module = rayGenModule;                    // Contains the shader
-    stages[0].pName  = "main";                          // Name of the entry point
+    stages[0].pName  = @spirv(rgen_shader);             // Name of the entry point
 
     // Then we make groups point to the shader stages. Each group can point to
     // 1-3 shader stages depending on the type, by specifying the index in the
@@ -494,6 +532,7 @@ int main(int argc, const char** argv)
   }
 
   const uint32_t NUM_SAMPLE_BATCHES = 32;
+  PushConstants pushConstants { };
   for(uint32_t sampleBatch = 0; sampleBatch < NUM_SAMPLE_BATCHES; sampleBatch++)
   {
     // Create and start recording a command buffer

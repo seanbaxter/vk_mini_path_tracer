@@ -64,7 +64,7 @@ inline float stepAndOutputRNGFloat(uint& rngState) {
 
 // Uses the Box-Muller transform to return a normally distributed (centered
 // at 0, standard deviation 1) 2D point.
-vec2 randomGaussian(uint& rngState)
+inline vec2 randomGaussian(uint& rngState)
 {
   // Almost uniform in (0, 1] - make sure the value is never 0:
   const float u1    = max(1e-38f, stepAndOutputRNGFloat(rngState));
@@ -77,15 +77,9 @@ vec2 randomGaussian(uint& rngState)
 // Returns the color of the sky in a given direction (in linear color space)
 inline vec3 skyColor(vec3 direction)
 {
-  // +y in world space is up, so:
-  if(direction.y > 0)
-  {
-    return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
-  }
-  else
-  {
-    return vec3(0.03f);
-  }
+  return (direction.y > 0) ?
+    mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y) :
+    vec3(0.03f);
 }
 
 // offsetPositionAlongNormal shifts a point on a triangle surface so that a
@@ -103,7 +97,7 @@ inline vec3 skyColor(vec3 direction)
 // Self-Intersection" from Ray Tracing Gems (version 1.7, 2020).
 // The normal can be negated if one wants the ray to pass through
 // the surface instead.
-vec3 offsetPositionAlongNormal(vec3 worldPosition, vec3 normal)
+inline vec3 offsetPositionAlongNormal(vec3 worldPosition, vec3 normal)
 {
   // Convert the normal to an integer offset.
   const float int_scale = 256.0f;
@@ -123,7 +117,7 @@ vec3 offsetPositionAlongNormal(vec3 worldPosition, vec3 normal)
 // given normal, using the given random number generator state. This is
 // cosine-weighted, so directions closer to the normal are more likely to
 // be chosen.
-vec3 diffuseReflection(vec3 normal, uint& rngState)
+inline vec3 diffuseReflection(vec3 normal, uint& rngState)
 {
   // For a random diffuse bounce direction, we follow the approach of
   // Ray Tracing in One Weekend, and generate a random point on a sphere
