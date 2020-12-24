@@ -43,7 +43,7 @@ path-tracing/bin_x64$ gimp out.hdr
 
 ## Vulkan validator
 
-Debug builds will bring the Vulkan validator into play. I suggest leaving this off right now. These samples use the bleeding-edge [VK_KHR_ray_query] extension, and support is very spotty in tools. On my system, the validator breaks when running some samples because it's not new enough to understand the SPIR-V capabilities.
+Debug builds will bring the Vulkan validator into play. I suggest leaving this off right now. These samples use the bleeding-edge [GLSL_EXT_ray_query](https://github.com/KhronosGroup/GLSL/blob/master/extensions/ext/GLSL_EXT_ray_query.txt) extension, and support is very spotty in tools. On my system, the validator breaks when running some samples because it's not new enough to understand the SPIR-V capabilities.
 
 ## Circle changes
 
