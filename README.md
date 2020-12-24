@@ -1,74 +1,162 @@
-![logo](http://nvidianews.nvidia.com/_ir/219/20157/NV_Designworks_logo_horizontal_greenblack.png)
+[![small](small.png)](fullsize.png)
 
 # vk_mini_path_tracer
 
-A relatively small, beginner-friendly path tracing tutorial.
+This branch is the [Circle C++ shaders](https://github.com/seanbaxter/shaders/blob/master/README.md) port of [Neil Bickford](https://twitter.com/neilbickford)'s **[Vulkan mini path tracer tutorial](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html)**.
 
-:arrow_forward: **[Load the tutorial!](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html)** :arrow_backward:
+Compile with [Circle build 110](https://www.circle-lang.org).
 
-This tutorial is a beginner-friendly introduction to writing your own fast,
-photorealistic path tracer in less than 300 lines of C++ code and 250 lines of
-GLSL shader code using Vulkan. Here's an example of what you'll render at the
-end of this tutorial!
+You'll need the dependencies listed [here](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#hello,vulkan!/settingupyourdevelopmentenvironment/installdependencies).
 
-![](docs/images/12-vk_mini_path_tracer.png)
+To build, try this:
 
-Vulkan is a low-level API for programming GPUs – fast, highly parallel processors.
-It works on a wide variety of platforms – everything from workstations, to
-gaming consoles, to tablets and mobile phones, to edge devices.
+```
+# Download the nvpro framework.
+$ mkdir path-tracing
+$ cd path-tracing
+path-tracing$ git clone git@github.com:nvpro-samples/shared_sources
+path-tracing$ git clone git@github.com:nvpro-samples/shared_external
 
-Vulkan is usually known as a complex API, but I believe that when presented in
-the right way, it's possible to make learning Vulkan accessible to people of all
-skill levels, whether they're never programmed graphics before or whether
-they're a seasoned rendering engineer. Perhaps surprisingly, one of the best
-ways to introduce Vulkan may be with GPU path tracing, because the API involved
-is relatively small.
+# Download the circle branch of the tutorial samples.
+path-tracing$ git clone git@github.com:seanbaxter/vk_mini_path_tracer -b circle
+path-tracing$ cd vk_mini_path_tracer
 
-We'll show how to write a small path tracer, using the NVVK helpers, included in
-the nvpro-samples framework, to help with some Vulkan calls when needed.
-For advanced readers, we'll also optionally talk about performance tips and some
-of the implementation details inside the helpers and Vulkan itself.
+# Point cmake to circle. If it's in the path, it's real easy.
+path-tracing/vk_mini_path_tracer$ cmake -DCMAKE_CXX_COMPILER=circle .
 
-The final program uses less than 300 lines of C++ and less than 250 lines of GLSL shader code, including comments. You can find it [here](https://github.com/nvpro-samples/vk_mini_path_tracer/blob/main/vk_mini_path_tracer).
+# Compile with some number of cores.
+path-tracing/vk_mini_path_tracer$ make -j4
 
-Here are all the Vulkan functions, and NVVK functions and objects, that we'll use in the main tutorial:
+# The binaries were put in the bin_x64 folder. Go there.
+path-tracing/vk_mini_path_tracer$ cd ../bin_x64
 
-| **Vulkan Functions**     |                          |                          |
-| ------------------------ | ------------------------ | ------------------------ |
-| vkAllocateCommandBuffers | vkBeginCommandBuffer     | vkCmdBindDescriptorSets  |
-| vkCmdBindPipeline        | vkCmdDispatch            | vkCmdFillBuffer          |
-| vkCmdPipelineBarrier     | vkCreateCommandPool      | vkCreateComputePipelines |
-| vkDestroyCommandPool     | vkDestroyPipeline        | vkDestroyShaderModule    |
-| vkFreeCommandBuffers     | vkGetBufferDeviceAddress | vkQueueSubmit            |
-| vkQueueWaitIdle          | vkUpdateDescriptorSets   |                          |
+# Run some of the samples.
+path-tracing/bin_x64$ ./vk_mini_path_tracer_e11_rt_pipeline_3.exe
 
-| **NVVK Functions and Objects** |                         |                            |
-| ------------------------------ | ----------------------- | -------------------------- |
-| nvvk::AllocatorDedicated       | nvvk::BufferDedicated   | NVVK_CHECK                 |
-| nvvk::Context                  | nvvk::ContextCreateInfo | nvvk::createShaderModule   |
-| nvvk::DescriptorSetContainer   | nvvk::make              | nvvk::RayTracingBuilderKHR |
+# All samples write a new image to out.hdr in this folder.
+# Use an image editor to view. HDR is an uncommon format, so most 
+# viewes don't support it. I use GIMP.
+path-tracing/bin_x64$ gimp out.hdr
 
--------
+# Ooh. Aah.
+```
 
-## Chapters
+## Vulkan validator
 
-| **Chapter**                                                  |                                                              |                                                              |                                                              |
-| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| ![small](docs/images/1-thumbnail.png)<br/>[Hello, Vulkan!](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#hello,vulkan!) | ![small](docs/images/2-thumbnail.png)<br/>[Device Extensions and Vulkan Objects](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#deviceextensionsandvulkanobjects) | ![small](docs/images/3-thumbnail.png)<br/>[Memory and Commands](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#memory) | ![small](docs/images/4-gray.png)<br/>[Writing an Image](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#writinganimage) |
-| ![small](docs/images/5-thumbnail.png)<br/>[Compute Shaders](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#computeshaders) | ![small](docs/images/6-descriptors.png)<br/>[Descriptors](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#descriptors) | ![small](docs/images/7-depthMap.png)<br/>[Acceleration Structures and Ray Tracing](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#descriptors) | ![small](docs/images/8-barycentricCoordinates.png)<br/>[Four Uses of Intersection Data](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#fourusesofintersectiondata) |
-| ![small](docs/images/9-normals.png)<br/>[Accessing Mesh Data](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#accessingmeshdata) | ![small](docs/images/10-reflectionPt3.png)<br/>[Perfectly Specular Reflections](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#perfectlyspecularreflections) | ![small](docs/images/11-randomNoise.png)<br/>[Antialiasing and Pseudorandom Number Generation](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#antialiasingandpseudorandomnumbergeneration) | ![small](docs/images/12-vk_mini_path_tracer.png)<br/>[Diffuse Reflection](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#diffusereflection) |
+Debug builds will bring the Vulkan validator into play. I suggest leaving this off right now. These samples use the bleeding-edge [VK_KHR_ray_query] extension, and support is very spotty in tools. On my system, the validator breaks when running some samples because it's not new enough to understand the SPIR-V capabilities.
 
-## Extra Chapters
+## Circle changes
 
-These are optional, extra tutorials that show how to polish and add new features to the main tutorial's path tracer. Make sure to check out the [list of further Vulkan and ray tracing resources](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#pnext:goingfurther/furtherreading) at the end of the main tutorial as well!
+I ported most of the samples by copying code from Neil's GLSL, pasting it into main.cpp, and fixing some minor syntax issues. This serves as a useful test for the ray tracing and ray query support in Circle.
 
-| **Extra Chapter**                                            |                                                              |                                                              |                                                              |
-| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| ![](docs/images/e1-gaussianBlur.png)<br/> [Gaussian Filter Antialiasing](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#gaussianfilterantialiasing) | ![](docs/images/e2-zoomRange.png)<br/>[Measuring Performance](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#measuringperformance) | ![](docs/images/e3-thumbnail.png)<br/>[Compaction](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#compaction) | ![](docs/images/e4-thumbnail.png)<br/>[Including Files and Matching Values Between C++ And GLSL](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#includingfilesandmatchingvaluesbetweenc++andglsl) |
-| ![](docs/images/e5-1024-600.png)<br/> [Push Constants](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#pushconstants) | ![](docs/images/e6-output.png)<br/>[More Samples](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#moresamples) | ![](docs/images/e7-sparse.png)<br/>[Images](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#images) | ![](docs/images/e8-thumbnail.png)<br/>[Debug Names](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#debugnames) |
-| ![](docs/images/e9-result.png)<br/>[Instances and Transformation Matrices](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#instancesandtransformationmatrices) | ![](docs/images/e10-closeup.png)<br/>[Multiple Materials](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#multiplematerials) | ![](docs/images/e11-output-3.png)<br/>[Ray Tracing Pipelines](https://nvpro-samples.github.io/vk_mini_path_tracer/extras.html#raytracingpipelines) |                                                              |
+Once the tutorial incorporates materials, some of the C++ mechanism kicks in and we see real improvement over what shader languages offer.
 
-## Building and Running
+### Object-oriented programming
 
-Please see the instructions [here](https://nvpro-samples.github.io/vk_mini_path_tracer/index.html#hello,vulkan!/settingupyourdevelopmentenvironment).
+As with the [SDF shadertoy sample](https://github.com/seanbaxter/shaders/blob/master/README.md#configuring-a-shader-from-json), I factor the materials into self-contained classes. 
 
+[main.cpp](checkpoints/e10_materials/main.cpp)
+```cpp
+// A material where 50% of incoming rays pass through the surface (treating it
+// as transparent), and the other 50% bounce off using diffuse reflection.
+struct material4_t {
+  ReturnedInfo sample(HitInfo hit, uint& rngState) const noexcept {
+    ReturnedInfo result;
+    result.color = color;
+    if(stepAndOutputRNGFloat(rngState) < transparency) {
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, hit.worldNormal);
+      result.rayDirection = diffuseReflection(hit.worldNormal, rngState);
+
+    } else {
+      result.rayOrigin    = offsetPositionAlongNormal(hit.worldPosition, -hit.worldNormal);
+      result.rayDirection = hit.rayDirection;
+    }
+    return result;
+  }
+
+  vec3 color = vec3(0.7);
+  float transparency = .5;
+};
+```
+
+Each material is expressed as a class with a standard interface: it takes a `HitInfo` struct, which has information about the ray that struck the primitive, and a reference to `uint`, which helps generate new random numbers. Effort has been taken to factor magic numbers out into data members. The color and transparency values are now data members rather than immediates, allowing the `material4_t` class to be bound to a uniform buffer object and controlled interactively. A user interface can even be generated automatically using reflection, as demonstrated in the [shadertoy samples](https://github.com/seanbaxter/shaders/blob/master/README.md#user-attributes-and-dear-imgui). Additionally, the design insulates the logic of the material from the idiosyncracies of the underlying API (in this case, Vulkan and SPIR-V). This allows the same code to be deployed on other parallel architectures (like CUDA and SYCL compilers) as well as the CPU. It's very easy to write path tracers for CPU, and being able to call your Vulkan/RTX materials allows you to potentially debug your path tracer with tools loggers and gdb.
+
+### Using reflection 
+
+```cpp
+struct my_materials_t {
+  material0_t mat0;
+  material1_t mat1;
+  material2_t mat2;
+  material3_t mat3;
+  material4_t mat4;
+  material5_t mat5;
+  material6_t mat6;
+  material7_t mat7;
+  material8_t mat8;
+};
+```
+
+My port aggregates materials into new types. This type is a single point of definition for the path tracer instance. You can add and remove data members, and the shader and host code stay in sync, because they reflect off this definition.
+
+```cpp
+        switch(sbtOffset) {
+          @meta for(int i = 0; i < @member_count(materials_t); ++i) {
+            case i:
+              returnedInfo = mat.@member_value(i).sample(hitInfo, rngState);
+              break;
+          }
+        }
+```
+
+For example, the compute shader in [e10-materials](checkpoints/e10_materials/main.cpp) gets the SBT offset with the GLSL API, and uses that to switch into the right material. Reflection is used to generate that switch. See the [Circle reflection and typed enums](https://github.com/seanbaxter/circle/blob/master/reflection/README.md) document for more info on reflection.
+
+### Using templates
+
+The [e11/3 example](checkpoints/e11_rt_pipeline3/main.cpp) uses a separate closest-hit shader for each material. This is implemented with an rchit function template:
+
+```cpp
+template<typename material_t>
+[[spirv::rchit]]
+void rchit_shader() {
+  HitInfo hitInfo = getObjectHitInfo();
+  
+  material_t mat;
+  ReturnedInfo returned = mat.sample(hitInfo, shader_pld_in.rngState);
+  
+  shader_pld_in.color        = returned.color;
+  shader_pld_in.rayOrigin    = returned.rayOrigin;
+  shader_pld_in.rayDirection = returned.rayDirection;
+  shader_pld_in.rayHitSky    = false;
+}
+```
+
+The shader interrogates the ray tracing context to get intersection info. It invokes the material sampler function, passes this intersection info, and gets the color and out-going ray information.
+
+```cpp
+// Define the materials we want to support in a type list.
+enum typename my_materials_t {
+  material0_t,
+  material1_t,
+  material2_t,
+  material3_t,
+  material4_t,
+  material5_t,
+  material6_t,
+  material7_t,
+  material8_t,
+};
+```
+
+The compute shader example aggregated all its materials into a struct. The ray tracing pipeline examples uses a type list to collect them. This type list is the single point of definition for the path tracer materials. The host code that names the rchit shaders loops over the types in this list and specializes the shader function template over each named material:
+
+```cpp
+
+    @meta for(int i = 0; i < NUM_C_HIT_SHADERS; ++i) {
+      stages[2 + i] = stages[0];
+      stages[2 + i].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+      stages[2 + i].pName = @spirv(rchit_shader<@enum_type(my_materials_t, i)>);
+    }
+```
+
+The techniques of object-oriented programming and reflection help encourage a design that produces reusable code that compiles for multiple targets.

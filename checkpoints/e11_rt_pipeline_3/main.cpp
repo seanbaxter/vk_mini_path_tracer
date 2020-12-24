@@ -507,8 +507,8 @@ VkDeviceAddress GetBufferDeviceAddress(VkDevice device, VkBuffer buffer)
 
 int main(int argc, const char** argv)
 {
-  const uint32_t render_width  = 3000;
-  const uint32_t render_height = 2000;
+  const uint32_t render_width  = 800;
+  const uint32_t render_height = 600;
 
   // Create the Vulkan context, consisting of an instance, device, physical device, and queues.
   nvvk::ContextCreateInfo deviceInfo;  // One can modify this to load different extensions or pick the Vulkan core version
